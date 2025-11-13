@@ -1,3 +1,16 @@
+# Zig build artifacts
 .zig-cache/
 zig-out/
+zig-cache/
+
+# Object files and libraries
 *.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Temporary files
+*.swp
+*.swo
+*~

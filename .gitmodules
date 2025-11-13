@@ -1,0 +1,6 @@
+[submodule "deps/zig-pfcp"]
+	path = deps/zig-pfcp
+	url = https://github.com/xandlom/zig-pfcp.git
+[submodule "deps/zig-gtp-u"]
+	path = deps/zig-gtp-u
+	url = https://github.com/xandlom/zig-gtp-u.git
