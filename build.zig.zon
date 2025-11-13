@@ -1,0 +1,12 @@
+.{
+    .name = .picoup,
+    .version = "0.1.0",
+    .fingerprint = 0x46979121fdfb4fa8,
+    .minimum_zig_version = "0.14.1",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "deps",
+    },
+}
