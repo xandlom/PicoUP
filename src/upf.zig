@@ -147,6 +147,82 @@ const Session = struct {
         }
         return null;
     }
+
+    fn findPDRById(self: *Session, pdr_id: u16) ?*PDR {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.pdr_count) |i| {
+            if (self.pdrs[i].allocated and self.pdrs[i].id == pdr_id) {
+                return &self.pdrs[i];
+            }
+        }
+        return null;
+    }
+
+    fn updatePDR(self: *Session, pdr: PDR) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.pdr_count) |i| {
+            if (self.pdrs[i].allocated and self.pdrs[i].id == pdr.id) {
+                self.pdrs[i] = pdr;
+                return;
+            }
+        }
+        return error.PDRNotFound;
+    }
+
+    fn removePDR(self: *Session, pdr_id: u16) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.pdr_count) |i| {
+            if (self.pdrs[i].allocated and self.pdrs[i].id == pdr_id) {
+                self.pdrs[i].allocated = false;
+                // Compact the array by shifting remaining PDRs
+                var j = i;
+                while (j < self.pdr_count - 1) : (j += 1) {
+                    self.pdrs[j] = self.pdrs[j + 1];
+                }
+                self.pdr_count -= 1;
+                return;
+            }
+        }
+        return error.PDRNotFound;
+    }
+
+    fn updateFAR(self: *Session, far: FAR) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.far_count) |i| {
+            if (self.fars[i].allocated and self.fars[i].id == far.id) {
+                self.fars[i] = far;
+                return;
+            }
+        }
+        return error.FARNotFound;
+    }
+
+    fn removeFAR(self: *Session, far_id: u16) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.far_count) |i| {
+            if (self.fars[i].allocated and self.fars[i].id == far_id) {
+                self.fars[i].allocated = false;
+                // Compact the array by shifting remaining FARs
+                var j = i;
+                while (j < self.far_count - 1) : (j += 1) {
+                    self.fars[j] = self.fars[j + 1];
+                }
+                self.far_count -= 1;
+                return;
+            }
+        }
+        return error.FARNotFound;
+    }
 };
 
 // Session Manager - manages all PFCP sessions
@@ -326,6 +402,7 @@ const Stats = struct {
 var global_stats: Stats = undefined;
 var session_manager: SessionManager = undefined;
 var packet_queue: PacketQueue = undefined;
+var pfcp_association_established: Atomic(bool) = Atomic(bool).init(false);
 var should_stop: Atomic(bool) = Atomic(bool).init(false);
 var gtpu_socket: std.posix.socket_t = undefined;
 var upf_ipv4: [4]u8 = undefined;
@@ -509,88 +586,412 @@ fn handlePfcpMessage(data: []const u8, client_addr: net.Address, socket: std.pos
     _ = allocator;
     _ = global_stats.pfcp_messages.fetchAdd(1, .seq_cst);
 
-    if (data.len < 4) {
-        print("PFCP: Packet too short\n", .{});
+    // Parse PFCP header using zig-pfcp library
+    var reader = pfcp.marshal.Reader.init(data);
+    const header = pfcp.marshal.decodePfcpHeader(&reader) catch |err| {
+        print("PFCP: Failed to decode header: {}\n", .{err});
+        return;
+    };
+
+    print("PFCP: Received message type {}, SEID: {?x}, seq: {}, from {}\n",
+        .{ header.message_type, header.seid, header.sequence_number, client_addr });
+
+    // Handle different message types
+    const msg_type: pfcp.types.MessageType = @enumFromInt(header.message_type);
+    switch (msg_type) {
+        .heartbeat_request => {
+            handleHeartbeatRequest(socket, &header, client_addr);
+        },
+        .association_setup_request => {
+            handleAssociationSetup(socket, &header, &reader, client_addr);
+        },
+        .session_establishment_request => {
+            handleSessionEstablishment(socket, &header, &reader, client_addr);
+        },
+        .session_modification_request => {
+            handleSessionModification(socket, &header, &reader, client_addr);
+        },
+        .session_deletion_request => {
+            handleSessionDeletion(socket, &header, &reader, client_addr);
+        },
+        else => {
+            print("PFCP: Unsupported message type: {}\n", .{msg_type});
+        },
+    }
+}
+
+// Heartbeat Request handler
+fn handleHeartbeatRequest(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, client_addr: net.Address) void {
+    print("PFCP: Heartbeat Request received\n", .{});
+
+    // Build Heartbeat Response
+    var response_buf: [256]u8 = undefined;
+    var writer = pfcp.marshal.Writer.init(&response_buf);
+
+    // Create response header
+    var resp_header = pfcp.types.PfcpHeader.init(.heartbeat_response, false);
+    resp_header.sequence_number = req_header.sequence_number;
+
+    const header_start = writer.pos;
+    pfcp.marshal.encodePfcpHeader(&writer, resp_header) catch {
+        print("PFCP: Failed to encode header\n", .{});
+        return;
+    };
+
+    // Add Recovery Time Stamp IE
+    const recovery_ts = pfcp.ie.RecoveryTimeStamp.fromUnixTime(global_stats.start_time);
+    pfcp.marshal.encodeRecoveryTimeStamp(&writer, recovery_ts) catch {
+        print("PFCP: Failed to encode Recovery Time Stamp\n", .{});
+        return;
+    };
+
+    // Update message length
+    const message_length: u16 = @intCast(writer.pos - header_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = header_start + 2;
+    _ = writer.writeU16(message_length) catch return;
+    writer.pos = saved_pos;
+
+    // Send response
+    const response = writer.getWritten();
+    _ = std.posix.sendto(socket, response, 0, &client_addr.any, client_addr.getOsSockLen()) catch {
+        print("PFCP: Failed to send Heartbeat Response\n", .{});
+    };
+}
+
+// Association Setup Request handler
+fn handleAssociationSetup(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, reader: *pfcp.marshal.Reader, client_addr: net.Address) void {
+    print("PFCP: Association Setup Request received from {}\n", .{client_addr});
+
+    // Parse mandatory IEs: Node ID and Recovery Time Stamp
+    var found_node_id = false;
+    var found_recovery_ts = false;
+    var remote_node_id_type: pfcp.types.NodeIdType = .ipv4;
+    var remote_recovery_ts: u32 = 0;
+
+    // Parse IEs from the message body
+    while (reader.remaining() > 0) {
+        const ie_header = pfcp.marshal.decodeIEHeader(reader) catch break;
+        const ie_type: pfcp.types.IEType = @enumFromInt(ie_header.ie_type);
+
+        switch (ie_type) {
+            .node_id => {
+                // Parse node ID type (first byte)
+                if (ie_header.length >= 1) {
+                    const type_byte = reader.readByte() catch break;
+                    remote_node_id_type = @enumFromInt(@as(u4, @truncate(type_byte)));
+                    // Skip the rest of the node ID value
+                    reader.pos += ie_header.length - 1;
+                    found_node_id = true;
+                    print("PFCP: Remote Node ID type: {}\n", .{remote_node_id_type});
+                } else {
+                    reader.pos += ie_header.length;
+                }
+            },
+            .recovery_time_stamp => {
+                if (ie_header.length == 4) {
+                    remote_recovery_ts = reader.readU32() catch break;
+                    found_recovery_ts = true;
+                    print("PFCP: Remote Recovery Time Stamp: {}\n", .{remote_recovery_ts});
+                } else {
+                    reader.pos += ie_header.length;
+                }
+            },
+            else => {
+                // Skip other optional IEs (UP Function Features, CP Function Features, etc.)
+                reader.pos += ie_header.length;
+            },
+        }
+    }
+
+    // Validate mandatory IEs
+    if (!found_node_id or !found_recovery_ts) {
+        print("PFCP: Missing mandatory IE in Association Setup Request\n", .{});
+        sendAssociationSetupResponse(socket, req_header, client_addr, .mandatory_ie_missing);
         return;
     }
 
-    const version = (data[0] >> 5) & 0x07;
-    const message_type = data[1];
+    // Establish association
+    _ = pfcp_association_established.store(true, .seq_cst);
+    print("PFCP: Association established with {}\n", .{client_addr});
 
-    print("PFCP: Received message type 0x{x}, version {}, from {}\n",
-        .{ message_type, version, client_addr });
+    // Send success response
+    sendAssociationSetupResponse(socket, req_header, client_addr, .request_accepted);
+}
 
-    // Handle different message types
-    switch (message_type) {
-        1 => { // Heartbeat Request
-            print("PFCP: Heartbeat Request received\n", .{});
-            // Send Heartbeat Response (simplified)
-            var response = [_]u8{
-                0x20, 0x02, 0x00, 0x0C, // Version, Message Type, Length
-                0x00, 0x00, 0x00, 0x00, // Sequence Number (copy from request)
-                0x00, 0x00, 0x00, 0x00, // Recovery Time Stamp IE
-                0x00, 0x60, 0x00, 0x04, // IE type and length
-                0x00, 0x00, 0x00, 0x01, // Recovery timestamp value
-            };
-            // Copy sequence number from request
-            if (data.len >= 8) {
-                @memcpy(response[4..8], data[4..8]);
-            }
-            _ = std.posix.sendto(socket, &response, 0, &client_addr.any, client_addr.getOsSockLen()) catch {
-                print("PFCP: Failed to send Heartbeat Response\n", .{});
-            };
-        },
-        50 => { // Session Establishment Request
-            print("PFCP: Session Establishment Request received\n", .{});
+// Helper: Send Association Setup Response
+fn sendAssociationSetupResponse(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, client_addr: net.Address, cause_value: pfcp.types.CauseValue) void {
+    var response_buf: [512]u8 = undefined;
+    var writer = pfcp.marshal.Writer.init(&response_buf);
 
-            // For now, create a simple session with dummy PDR/FAR
-            const cp_seid: u64 = 0x1234567890ABCDEF; // Should parse from message
-            const up_seid = session_manager.createSession(cp_seid) catch {
-                print("PFCP: Failed to create session\n", .{});
-                return;
-            };
+    // Create response header (Association Setup is a node message, no SEID)
+    var resp_header = pfcp.types.PfcpHeader.init(.association_setup_response, false);
+    resp_header.sequence_number = req_header.sequence_number;
 
-            // Create default PDR and FAR
-            if (session_manager.findSession(up_seid)) |session| {
-                const pdr = PDR.init(1, 100, 0, 0x100, 1); // PDR ID 1, TEID 0x100, FAR ID 1
-                const far = FAR.init(1, 1, 1); // FAR ID 1, Forward, Core interface
+    const header_start = writer.pos;
+    pfcp.marshal.encodePfcpHeader(&writer, resp_header) catch return;
 
-                session.addPDR(pdr) catch {
-                    print("PFCP: Failed to add PDR\n", .{});
-                };
-                session.addFAR(far) catch {
-                    print("PFCP: Failed to add FAR\n", .{});
-                };
+    // Encode mandatory IEs: Node ID, Cause, Recovery Time Stamp
 
-                _ = global_stats.pfcp_sessions.fetchAdd(1, .seq_cst);
-                print("PFCP: Created session with SEID 0x{x}, PDR TEID: 0x{x}\n", .{ up_seid, pdr.teid });
-            }
+    // Node ID (use our UPF IPv4 address)
+    const node_id = pfcp.ie.NodeId.initIpv4(upf_ipv4);
+    pfcp.marshal.encodeNodeId(&writer, node_id) catch return;
 
-            // Send simplified Session Establishment Response
-            var response = [_]u8{
-                0x21, 0x32, 0x00, 0x20, // Version with SEID, Message Type, Length
-            } ++ [_]u8{0} ** 60;
+    // Cause
+    const cause = pfcp.ie.Cause.init(cause_value);
+    pfcp.marshal.encodeCause(&writer, cause) catch return;
 
-            // Add UP F-SEID to response
-            std.mem.writeInt(u64, response[4..12], up_seid, .big);
+    // Recovery Time Stamp
+    const recovery_ts = pfcp.ie.RecoveryTimeStamp.fromUnixTime(global_stats.start_time);
+    pfcp.marshal.encodeRecoveryTimeStamp(&writer, recovery_ts) catch return;
 
-            _ = std.posix.sendto(socket, response[0..36], 0, &client_addr.any, client_addr.getOsSockLen()) catch {
-                print("PFCP: Failed to send Session Establishment Response\n", .{});
-            };
-        },
-        53 => { // Session Deletion Request
-            print("PFCP: Session Deletion Request received\n", .{});
-            // Parse SEID and delete session
-            // Simplified response
-            var response = [_]u8{ 0x21, 0x35, 0x00, 0x0C } ++ [_]u8{0} ** 20;
-            _ = std.posix.sendto(socket, response[0..16], 0, &client_addr.any, client_addr.getOsSockLen()) catch {
-                print("PFCP: Failed to send Session Deletion Response\n", .{});
-            };
-        },
-        else => {
-            print("PFCP: Unsupported message type: 0x{x}\n", .{message_type});
-        },
+    // Update message length
+    const message_length: u16 = @intCast(writer.pos - header_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = header_start + 2;
+    _ = writer.writeU16(message_length) catch return;
+    writer.pos = saved_pos;
+
+    // Send response
+    const response = writer.getWritten();
+    _ = std.posix.sendto(socket, response, 0, &client_addr.any, client_addr.getOsSockLen()) catch {
+        print("PFCP: Failed to send Association Setup Response\n", .{});
+    };
+
+    if (cause_value == .request_accepted) {
+        print("PFCP: Association Setup Response sent (accepted)\n", .{});
+    } else {
+        print("PFCP: Association Setup Response sent (cause: {})\n", .{cause_value});
     }
+}
+
+// Session Establishment Request handler
+fn handleSessionEstablishment(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, reader: *pfcp.marshal.Reader, client_addr: net.Address) void {
+    print("PFCP: Session Establishment Request received\n", .{});
+
+    // Check if PFCP association is established
+    if (!pfcp_association_established.load(.seq_cst)) {
+        print("PFCP: No PFCP association established\n", .{});
+        sendSessionEstablishmentError(socket, req_header, client_addr, .no_established_pfcp_association);
+        return;
+    }
+
+    // Parse mandatory IEs: Node ID and F-SEID
+    var cp_seid: u64 = 0;
+    var found_fseid = false;
+
+    // Parse IEs from the message body
+    while (reader.remaining() > 0) {
+        const ie_header = pfcp.marshal.decodeIEHeader(reader) catch break;
+        const ie_type: pfcp.types.IEType = @enumFromInt(ie_header.ie_type);
+
+        switch (ie_type) {
+            .node_id => {
+                // Skip node ID for now
+                reader.pos += ie_header.length;
+            },
+            .f_seid => {
+                // Parse F-SEID to get CP SEID
+                if (ie_header.length >= 9) {
+                    const flags = reader.readByte() catch break;
+                    cp_seid = reader.readU64() catch break;
+                    // Skip IP address bytes
+                    const remaining_bytes = ie_header.length - 9;
+                    reader.pos += remaining_bytes;
+                    found_fseid = true;
+                    print("PFCP: CP F-SEID: 0x{x}, flags: 0x{x}\n", .{ cp_seid, flags });
+                } else {
+                    reader.pos += ie_header.length;
+                }
+            },
+            else => {
+                // Skip other IEs
+                reader.pos += ie_header.length;
+            },
+        }
+    }
+
+    // Validate mandatory IEs
+    if (!found_fseid) {
+        print("PFCP: Missing F-SEID in Session Establishment Request\n", .{});
+        sendSessionEstablishmentError(socket, req_header, client_addr, .mandatory_ie_missing);
+        return;
+    }
+
+    // Create session
+    const up_seid = session_manager.createSession(cp_seid) catch {
+        print("PFCP: Failed to create session\n", .{});
+        sendSessionEstablishmentError(socket, req_header, client_addr, .no_resources_available);
+        return;
+    };
+
+    // Create default PDR and FAR
+    if (session_manager.findSession(up_seid)) |session| {
+        const pdr = PDR.init(1, 100, 0, 0x100, 1);
+        const far = FAR.init(1, 1, 1);
+
+        session.addPDR(pdr) catch {};
+        session.addFAR(far) catch {};
+
+        _ = global_stats.pfcp_sessions.fetchAdd(1, .seq_cst);
+        print("PFCP: Created session with UP SEID 0x{x}, PDR TEID: 0x{x}\n", .{ up_seid, pdr.teid });
+    }
+
+    sendSessionEstablishmentResponse(socket, req_header, client_addr, up_seid, .request_accepted);
+}
+
+// Helper: Send Session Establishment Response
+fn sendSessionEstablishmentResponse(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, client_addr: net.Address, up_seid: u64, cause_value: pfcp.types.CauseValue) void {
+    var response_buf: [512]u8 = undefined;
+    var writer = pfcp.marshal.Writer.init(&response_buf);
+
+    var resp_header = pfcp.types.PfcpHeader.init(.session_establishment_response, true);
+    resp_header.seid = req_header.seid;
+    resp_header.sequence_number = req_header.sequence_number;
+
+    const header_start = writer.pos;
+    pfcp.marshal.encodePfcpHeader(&writer, resp_header) catch return;
+
+    const cause = pfcp.ie.Cause.init(cause_value);
+    pfcp.marshal.encodeCause(&writer, cause) catch return;
+
+    const up_fseid = pfcp.ie.FSEID.initV4(up_seid, [_]u8{ 10, 0, 0, 1 });
+    pfcp.marshal.encodeFSEID(&writer, up_fseid) catch return;
+
+    const message_length: u16 = @intCast(writer.pos - header_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = header_start + 2;
+    _ = writer.writeU16(message_length) catch return;
+    writer.pos = saved_pos;
+
+    const response = writer.getWritten();
+    _ = std.posix.sendto(socket, response, 0, &client_addr.any, client_addr.getOsSockLen()) catch {};
+}
+
+// Helper: Send Session Establishment Error Response
+fn sendSessionEstablishmentError(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, client_addr: net.Address, cause_value: pfcp.types.CauseValue) void {
+    var response_buf: [256]u8 = undefined;
+    var writer = pfcp.marshal.Writer.init(&response_buf);
+
+    var resp_header = pfcp.types.PfcpHeader.init(.session_establishment_response, true);
+    resp_header.seid = req_header.seid;
+    resp_header.sequence_number = req_header.sequence_number;
+
+    const header_start = writer.pos;
+    pfcp.marshal.encodePfcpHeader(&writer, resp_header) catch return;
+
+    const cause = pfcp.ie.Cause.init(cause_value);
+    pfcp.marshal.encodeCause(&writer, cause) catch return;
+
+    const message_length: u16 = @intCast(writer.pos - header_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = header_start + 2;
+    _ = writer.writeU16(message_length) catch return;
+    writer.pos = saved_pos;
+
+    const response = writer.getWritten();
+    _ = std.posix.sendto(socket, response, 0, &client_addr.any, client_addr.getOsSockLen()) catch {};
+}
+
+// Session Modification Request handler
+fn handleSessionModification(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, reader: *pfcp.marshal.Reader, client_addr: net.Address) void {
+    print("PFCP: Session Modification Request received\n", .{});
+
+    const seid = req_header.seid orelse {
+        print("PFCP: Session Modification Request missing SEID\n", .{});
+        return;
+    };
+
+    print("PFCP: Modifying session SEID 0x{x}\n", .{seid});
+
+    const session = session_manager.findSession(seid);
+    if (session == null) {
+        print("PFCP: Session 0x{x} not found\n", .{seid});
+        sendSessionModificationResponse(socket, req_header, client_addr, .session_context_not_found);
+        return;
+    }
+
+    // Parse IEs (simplified - full implementation would handle all IE types)
+    while (reader.remaining() > 0) {
+        const ie_header = pfcp.marshal.decodeIEHeader(reader) catch break;
+        reader.pos += ie_header.length;
+    }
+
+    print("PFCP: Session modification completed for SEID 0x{x}\n", .{seid});
+    sendSessionModificationResponse(socket, req_header, client_addr, .request_accepted);
+}
+
+// Helper: Send Session Modification Response
+fn sendSessionModificationResponse(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, client_addr: net.Address, cause_value: pfcp.types.CauseValue) void {
+    var response_buf: [256]u8 = undefined;
+    var writer = pfcp.marshal.Writer.init(&response_buf);
+
+    var resp_header = pfcp.types.PfcpHeader.init(.session_modification_response, true);
+    resp_header.seid = req_header.seid;
+    resp_header.sequence_number = req_header.sequence_number;
+
+    const header_start = writer.pos;
+    pfcp.marshal.encodePfcpHeader(&writer, resp_header) catch return;
+
+    const cause = pfcp.ie.Cause.init(cause_value);
+    pfcp.marshal.encodeCause(&writer, cause) catch return;
+
+    const message_length: u16 = @intCast(writer.pos - header_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = header_start + 2;
+    _ = writer.writeU16(message_length) catch return;
+    writer.pos = saved_pos;
+
+    const response = writer.getWritten();
+    _ = std.posix.sendto(socket, response, 0, &client_addr.any, client_addr.getOsSockLen()) catch {};
+}
+
+// Session Deletion Request handler
+fn handleSessionDeletion(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, reader: *pfcp.marshal.Reader, client_addr: net.Address) void {
+    print("PFCP: Session Deletion Request received\n", .{});
+    _ = reader;
+
+    const seid = req_header.seid orelse {
+        print("PFCP: Session Deletion Request missing SEID\n", .{});
+        return;
+    };
+
+    print("PFCP: Deleting session SEID 0x{x}\n", .{seid});
+
+    const deleted = session_manager.deleteSession(seid);
+    if (!deleted) {
+        print("PFCP: Failed to delete session 0x{x}\n", .{seid});
+        sendSessionDeletionResponse(socket, req_header, client_addr, .session_context_not_found);
+        return;
+    }
+
+    print("PFCP: Session 0x{x} deleted successfully\n", .{seid});
+    sendSessionDeletionResponse(socket, req_header, client_addr, .request_accepted);
+}
+
+// Helper: Send Session Deletion Response
+fn sendSessionDeletionResponse(socket: std.posix.socket_t, req_header: *const pfcp.types.PfcpHeader, client_addr: net.Address, cause_value: pfcp.types.CauseValue) void {
+    var response_buf: [256]u8 = undefined;
+    var writer = pfcp.marshal.Writer.init(&response_buf);
+
+    var resp_header = pfcp.types.PfcpHeader.init(.session_deletion_response, true);
+    resp_header.seid = req_header.seid;
+    resp_header.sequence_number = req_header.sequence_number;
+
+    const header_start = writer.pos;
+    pfcp.marshal.encodePfcpHeader(&writer, resp_header) catch return;
+
+    const cause = pfcp.ie.Cause.init(cause_value);
+    pfcp.marshal.encodeCause(&writer, cause) catch return;
+
+    const message_length: u16 = @intCast(writer.pos - header_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = header_start + 2;
+    _ = writer.writeU16(message_length) catch return;
+    writer.pos = saved_pos;
+
+    const response = writer.getWritten();
+    _ = std.posix.sendto(socket, response, 0, &client_addr.any, client_addr.getOsSockLen()) catch {};
 }
 
 // PFCP thread
