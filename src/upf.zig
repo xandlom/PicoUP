@@ -4,9 +4,8 @@ const print = std.debug.print;
 const Thread = std.Thread;
 const Atomic = std.atomic.Value;
 
-// Import PFCP and GTP-U libraries
+// Import PFCP library
 const pfcp = @import("zig-pfcp");
-const gtpu = @import("zig-gtp-u");
 
 // Import our modules
 const types = @import("types.zig");
