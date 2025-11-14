@@ -5,14 +5,18 @@ PicoUP is a simple, lightweight User Plane Function (UPF) implementation for 5G 
 ## Features
 
 - **PFCP Control Plane**: Handles PFCP (Packet Forwarding Control Protocol) messages on port 8805
+  - Association Setup (PFCP session establishment between SMF and UPF)
   - Heartbeat Request/Response
-  - Session Establishment/Deletion
+  - Session Establishment/Modification/Deletion
   - PDR (Packet Detection Rules) and FAR (Forwarding Action Rules) management
 
 - **GTP-U Data Plane**: Handles GTP-U (GPRS Tunneling Protocol - User Plane) packets on port 2152
   - G-PDU packet processing
   - TEID-based session lookup
   - Packet forwarding based on FAR rules
+  - N3 interface support (Access network - gNodeB)
+  - N6 interface support (Data network - partial implementation)
+  - N9 interface support (UPF-to-UPF communication)
 
 - **Multi-threaded Architecture**: Based on echo_udp_srv.zig pattern
   - Dedicated PFCP control plane thread
@@ -99,6 +103,7 @@ Uptime: 30s
 PFCP Messages: 15, Active Sessions: 3/3
 GTP-U RX: 1500, TX: 1450, Dropped: 50
 GTP-U Rate: 50 pkt/s RX, 48 pkt/s TX
+Interface TX: N3=500, N6=800, N9=150
 Queue Size: 0
 Worker Threads: 4
 ========================
@@ -108,10 +113,10 @@ Worker Threads: 4
 
 This is a simplified UPF implementation for educational and testing purposes:
 
-1. **Limited PFCP Support**: Only basic session establishment/deletion is implemented
-2. **Simplified Packet Processing**: Currently logs and drops packets based on FAR rules
-3. **No N6 Interface**: Does not forward decapsulated packets to data network
-4. **No N9 Interface**: Does not support UPF-to-UPF forwarding
+1. **Limited PFCP Support**: Session Modification is basic; no Session Reports or Usage Reporting
+2. **Simplified Packet Processing**: N6 interface logs packets but doesn't forward to data network
+3. **Partial N6 Interface**: Does not forward decapsulated packets to data network (requires routing setup)
+4. **Partial N9 Interface**: Basic UPF-to-UPF forwarding implemented, but no path management or QoS
 5. **No QoS Support**: QoS flows and QFI handling not implemented
 6. **Simplified PDR/FAR**: Only basic TEID matching and forward/drop actions
 
@@ -119,12 +124,15 @@ This is a simplified UPF implementation for educational and testing purposes:
 
 To make this a production-ready UPF, the following features need to be added:
 
-- [ ] Complete PFCP message support (Session Modification, Session Reports)
-- [ ] N6 interface for forwarding to data network
-- [ ] N9 interface for UPF-to-UPF communication
+- [x] Basic N9 interface for UPF-to-UPF communication
+- [x] Session Modification support
+- [x] PFCP Association Setup
+- [ ] Complete PFCP message support (Session Reports, Usage Reporting)
+- [ ] Full N6 interface for forwarding to data network
+- [ ] Advanced N9 features (path management, redundancy)
 - [ ] QoS flow support with QFI handling
-- [ ] Complete PDR matching (source IP, destination IP, etc.)
-- [ ] Complete FAR actions (buffering, notification)
+- [ ] Complete PDR matching (source IP, destination IP, ports, application ID)
+- [ ] Complete FAR actions (buffering, notification to SMF)
 - [ ] Usage reporting (URR)
 - [ ] QoS enforcement (QER)
 - [ ] Proper GTP-U extension header support
@@ -136,12 +144,24 @@ PicoUP/
 ├── build.zig           # Build configuration
 ├── build.zig.zon       # Package metadata
 ├── src/
-│   └── upf.zig        # Main UPF implementation
-├── deps/              # Dependencies (cloned via git)
+│   ├── upf.zig        # Main entry point and thread orchestration
+│   ├── types.zig      # Core types (PDR, FAR) and constants
+│   ├── session.zig    # Session and SessionManager
+│   ├── stats.zig      # Statistics collection and reporting
+│   ├── pfcp/          # PFCP control plane modules
+│   │   ├── handler.zig      # Main PFCP message router
+│   │   ├── heartbeat.zig    # Heartbeat handling
+│   │   ├── association.zig  # Association setup
+│   │   └── session.zig      # Session lifecycle management
+│   └── gtpu/          # GTP-U data plane modules
+│       ├── handler.zig      # GTP-U header parsing/creation
+│       └── worker.zig       # Worker threads and packet queue
+├── deps/              # Dependencies (git submodules)
 │   ├── zig-pfcp/
 │   └── zig-gtp-u/
-├── echo_udp_srv.zig   # Reference implementation
-└── README.md          # This file
+├── echo_udp_srv.zig   # Reference UDP server implementation
+├── README.md          # This file
+└── CLAUDE.md          # AI assistant guide
 ```
 
 ## License

@@ -49,8 +49,18 @@ This is a simplified implementation for educational purposes. See [Gotchas & Lim
 ```
 /home/user/PicoUP/
 ├── src/
-│   └── upf.zig                 # Main UPF implementation (776 lines)
-│                               # Contains all core logic: PDR, FAR, Session, threads
+│   ├── upf.zig                 # Main entry point and thread orchestration (180 lines)
+│   ├── types.zig              # Core types: PDR, FAR, constants (63 lines)
+│   ├── session.zig            # Session and SessionManager (265 lines)
+│   ├── stats.zig              # Statistics collection and reporting (83 lines)
+│   ├── pfcp/                  # PFCP control plane modules
+│   │   ├── handler.zig        # Main PFCP message router (61 lines)
+│   │   ├── heartbeat.zig      # Heartbeat handling (53 lines)
+│   │   ├── association.zig    # Association setup (129 lines)
+│   │   └── session.zig        # Session lifecycle management (285 lines)
+│   └── gtpu/                  # GTP-U data plane modules
+│       ├── handler.zig        # GTP-U header parsing/creation (60 lines)
+│       └── worker.zig         # Worker threads and packet queue (205 lines)
 ├── deps/                       # Git submodules for external dependencies
 │   ├── zig-pfcp/              # PFCP protocol library (github.com/xandlom/zig-pfcp)
 │   └── zig-gtp-u/             # GTP-U protocol library (github.com/xandlom/zig-gtp-u)
@@ -58,6 +68,7 @@ This is a simplified implementation for educational purposes. See [Gotchas & Lim
 ├── build.zig.zon              # Package metadata and dependencies
 ├── echo_udp_srv.zig           # Reference UDP server implementation (338 lines)
 ├── README.md                   # User-facing documentation
+├── CLAUDE.md                   # AI assistant guide (this file)
 ├── LICENSE                     # Apache 2.0 License
 ├── .gitignore                 # Zig-specific ignore patterns
 └── .gitmodules                # Git submodule configuration
@@ -73,27 +84,42 @@ Build Artifacts (gitignored):
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/upf.zig` | 776 | Complete UPF implementation with all data structures and thread logic |
+| **Core Modules** | | |
+| `src/upf.zig` | 180 | Main entry point, thread orchestration, global state |
+| `src/types.zig` | 63 | Core types (PDR, FAR) and configuration constants |
+| `src/session.zig` | 265 | Session and SessionManager with thread-safe operations |
+| `src/stats.zig` | 83 | Statistics collection, atomic counters, reporting thread |
+| **PFCP Modules** | | |
+| `src/pfcp/handler.zig` | 61 | Main PFCP message router (dispatches by message type) |
+| `src/pfcp/heartbeat.zig` | 53 | Heartbeat Request/Response handling |
+| `src/pfcp/association.zig` | 129 | Association Setup Request/Response handling |
+| `src/pfcp/session.zig` | 285 | Session Establishment/Modification/Deletion handlers |
+| **GTP-U Modules** | | |
+| `src/gtpu/handler.zig` | 60 | GTP-U header parsing and creation functions |
+| `src/gtpu/worker.zig` | 205 | Worker threads, packet queue, packet processing logic |
+| **Build & Reference** | | |
 | `build.zig` | 59 | Build configuration, module setup, test configuration |
 | `echo_udp_srv.zig` | 338 | Reference implementation demonstrating UDP server pattern |
 
-### Key Sections in `src/upf.zig`
+### Module Organization
 
-| Lines | Component | Description |
-|-------|-----------|-------------|
-| 1-19 | Imports & Constants | Standard library imports, configuration constants |
-| 21-68 | PDR & FAR Structs | Packet Detection Rules and Forwarding Action Rules |
-| 71-150 | Session Struct | PFCP session management with thread-safe PDR/FAR arrays |
-| 153-231 | SessionManager | Global session manager (up to 100 sessions) |
-| 234-294 | Packet Queue | Thread-safe circular queue for worker threads |
-| 297-323 | Statistics | Atomic counters for monitoring |
-| 334-380 | GTP-U Parsing | Header parsing and encapsulation functions |
-| 383-513 | Worker Threads | Packet processing logic for N3/N6/N9 interfaces |
-| 516-602 | PFCP Handler | Control plane message processing |
-| 605-641 | PFCP Thread | Control plane thread listening on port 8805 |
-| 644-693 | GTP-U Thread | Data plane thread listening on port 2152 |
-| 696-736 | Stats Thread | Statistics reporting every 5 seconds |
-| 738-776 | Main Function | Initialization and thread orchestration |
+The codebase follows a modular architecture with clear separation of concerns:
+
+**Core Layer** (`src/*.zig`):
+- `upf.zig` - Application entry point and thread management
+- `types.zig` - Shared types and constants used across all modules
+- `session.zig` - PFCP session state management
+- `stats.zig` - Performance monitoring and metrics
+
+**Control Plane** (`src/pfcp/*.zig`):
+- `handler.zig` - Routes incoming PFCP messages to appropriate handlers
+- `heartbeat.zig` - Keeps PFCP association alive
+- `association.zig` - Establishes PFCP association with SMF
+- `session.zig` - Manages PFCP session lifecycle (create/modify/delete)
+
+**Data Plane** (`src/gtpu/*.zig`):
+- `handler.zig` - Low-level GTP-U protocol operations
+- `worker.zig` - Multi-threaded packet processing pipeline
 
 ---
 
@@ -173,7 +199,7 @@ PicoUP uses a multi-threaded architecture with 7 threads:
 
 ### Core Data Structures
 
-#### 1. PDR (Packet Detection Rule) - Line 21
+#### 1. PDR (Packet Detection Rule) - `types.zig:15`
 Defines how to identify packets that belong to a session.
 
 ```zig
@@ -187,7 +213,7 @@ const PDR = struct {
 };
 ```
 
-#### 2. FAR (Forwarding Action Rule) - Line 42
+#### 2. FAR (Forwarding Action Rule) - `types.zig:37`
 Defines what action to take when a PDR matches.
 
 ```zig
@@ -202,7 +228,7 @@ const FAR = struct {
 };
 ```
 
-#### 3. Session - Line 71
+#### 3. Session - `session.zig:15`
 Represents a PFCP session with associated PDRs and FARs.
 
 ```zig
@@ -221,7 +247,7 @@ const Session = struct {
 
 **Important**: Each session has its own mutex to protect PDR/FAR arrays during concurrent access.
 
-#### 4. SessionManager - Line 153
+#### 4. SessionManager - `session.zig:174`
 Global manager for all PFCP sessions.
 
 ```zig
@@ -239,7 +265,7 @@ const SessionManager = struct {
 - `findSessionByTeid(teid, source_interface)` - Find session by GTP-U TEID
 - `deleteSession(seid)` - Delete session and free slot
 
-#### 5. PacketQueue - Line 242
+#### 5. PacketQueue - `gtpu/worker.zig:25`
 Thread-safe circular buffer for distributing packets to workers.
 
 ```zig
@@ -254,7 +280,7 @@ const PacketQueue = struct {
 
 **Pattern**: Producer-consumer queue where GTP-U thread produces and worker threads consume.
 
-#### 6. Stats - Line 297
+#### 6. Stats - `stats.zig:13`
 Atomic statistics counters for monitoring.
 
 ```zig
@@ -665,38 +691,51 @@ std.mem.asBytes(&enable)
 
 ### Code Organization
 
-1. **Imports First** (lines 1-11 in upf.zig):
-   ```zig
-   const std = @import("std");
-   const net = std.net;
-   const print = std.debug.print;
-   // ... other imports
-   ```
+The modular architecture follows these organizational principles:
 
-2. **Constants** (lines 13-18):
-   ```zig
-   const WORKER_THREADS = 4;
-   const QUEUE_SIZE = 1000;
-   const PFCP_PORT = 8805;
-   ```
+**Per-Module Structure**:
+1. **Imports First** - Standard library and local module imports
+2. **Type Definitions** - Structs and enums specific to the module
+3. **Public Functions** - Exported functions used by other modules
+4. **Private Functions** - Internal helper functions
 
-3. **Data Structures** (types before functions):
-   - Simple structs first (PDR, FAR)
-   - Complex structs later (Session, SessionManager)
-   - Helper structs (GtpuPacket, Stats)
+**Example from `types.zig`**:
+```zig
+const std = @import("std");                    // Imports
 
-4. **Global Variables** (lines 326-331):
-   ```zig
-   var global_stats: Stats = undefined;
-   var session_manager: SessionManager = undefined;
-   // Initialized in main()
-   ```
+pub const WORKER_THREADS = 4;                  // Constants
+pub const QUEUE_SIZE = 1000;
 
-5. **Helper Functions** before thread functions
+pub const PDR = struct { ... };                // Type definitions
+pub const FAR = struct { ... };
+```
 
-6. **Thread Functions** before main
+**Example from `upf.zig`** (main entry point):
+```zig
+// 1. Imports (stdlib and local modules)
+const std = @import("std");
+const types = @import("types.zig");
+const session_mod = @import("session.zig");
 
-7. **Main Function** last
+// 2. Global variables (initialized in main)
+pub var global_stats: stats_mod.Stats = undefined;
+pub var session_manager: session_mod.SessionManager = undefined;
+
+// 3. Thread functions
+fn pfcpThread(...) !void { ... }
+fn gtpuThread() !void { ... }
+
+// 4. Main function (last)
+pub fn main() !void { ... }
+```
+
+**Module Dependencies**:
+- `types.zig` - No dependencies (foundation)
+- `session.zig` - Depends on `types.zig`
+- `stats.zig` - Depends on `types.zig`, `session.zig`
+- `pfcp/*.zig` - Depends on `types.zig`, `session.zig`, `stats.zig`
+- `gtpu/*.zig` - Depends on `types.zig`, `session.zig`, `stats.zig`
+- `upf.zig` - Depends on all modules (orchestration layer)
 
 ### Comments
 
@@ -758,7 +797,7 @@ Understanding the 5G context is crucial for working on this codebase.
 
 **Purpose**: Control plane protocol between SMF and UPF for session management.
 
-**Key Message Types** (implemented in `handlePfcpMessage`, line 516):
+**Key Message Types** (implemented in `pfcp/handler.zig:handlePfcpMessage`):
 
 | Type | Name | Description |
 |------|------|-------------|
@@ -795,7 +834,7 @@ Understanding the 5G context is crucial for working on this codebase.
 
 **Purpose**: Data plane protocol for tunneling user traffic over UDP.
 
-**GTP-U Header Format** (see `parseGtpuHeader`, line 334):
+**GTP-U Header Format** (see `gtpu/handler.zig:parseGtpuHeader`):
 ```
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -826,7 +865,7 @@ Understanding the 5G context is crucial for working on this codebase.
 - ✅ Basic GTP-U header parsing (8 bytes, no extensions)
 - ✅ G-PDU (0xFF) message type
 - ✅ TEID-based session lookup
-- ✅ GTP-U encapsulation (`createGtpuHeader`, line 360)
+- ✅ GTP-U encapsulation (`gtpu/handler.zig:createGtpuHeader`)
 - ❌ Extension header support
 - ❌ Sequence number handling
 - ❌ Echo Request/Response
@@ -883,57 +922,71 @@ These can be found at: https://www.3gpp.org/DynaReport/29-series.htm
 ### Adding a New PFCP Message Type
 
 1. **Identify message type code** from TS 29.244
-2. **Add case to switch statement** in `handlePfcpMessage` (line 532)
-3. **Parse message IEs** (Information Elements)
-4. **Update session state** via SessionManager
-5. **Send response message**
+2. **Add new message type to `pfcp/handler.zig`** switch statement
+3. **Create handler function** in appropriate `pfcp/*.zig` module
+4. **Parse message IEs** (Information Elements) using zig-pfcp library
+5. **Update session state** via SessionManager
+6. **Send response message** using zig-pfcp library
 
-Example:
+Example in `pfcp/handler.zig`:
 ```zig
-52 => { // Session Modification Request
-    print("PFCP: Session Modification Request received\n", .{});
-    // Parse SEID from message
-    // Modify session PDRs/FARs
-    // Send Session Modification Response (type 53)
+.session_report_request => {
+    pfcp_session.handleSessionReport(socket, &header, &reader, client_addr, session_manager);
 },
+```
+
+Then implement handler in `pfcp/session.zig`:
+```zig
+pub fn handleSessionReport(
+    socket: std.posix.socket_t,
+    header: *const pfcp.types.PfcpHeader,
+    reader: *pfcp.marshal.Reader,
+    client_addr: net.Address,
+    session_manager: *session_mod.SessionManager,
+) void {
+    // Parse SEID and IEs
+    // Update session state
+    // Send response
+}
 ```
 
 ### Adding a New FAR Action
 
-1. **Define action code** in FAR struct comment (line 44)
-2. **Add case in worker thread** (line 402)
+1. **Define action code** in `types.zig` FAR struct comment (line 39)
+2. **Add case in `gtpu/worker.zig`** worker thread function (around line 105)
 3. **Implement forwarding logic**
 4. **Update statistics** if needed
 
-Example for "Buffer" action:
+Example for "Buffer" action in `gtpu/worker.zig`:
 ```zig
 2 => { // Buffer
     print("Worker {}: Buffering packet, TEID: 0x{x}\n", .{thread_id, header.teid});
     // Store packet in buffer
     // Increment buffer counter
+    _ = stats.buffer_packets.fetchAdd(1, .seq_cst);
 },
 ```
 
 ### Adding a New Statistic
 
-1. **Add atomic counter** to Stats struct (line 297)
-2. **Initialize in Stats.init()** (line 309)
+1. **Add atomic counter** to `stats.zig` Stats struct (line 13)
+2. **Initialize in Stats.init()** (line 25)
 3. **Increment at appropriate location** using `.fetchAdd()`
-4. **Display in statsThread** (line 721)
+4. **Display in statsThread** in `stats.zig` (line 43)
 
 Example:
 ```zig
-// In Stats struct
+// In stats.zig Stats struct
 buffer_packets: Atomic(u64),
 
 // In Stats.init()
 .buffer_packets = Atomic(u64).init(0),
 
-// In worker thread
-_ = global_stats.buffer_packets.fetchAdd(1, .seq_cst);
+// In gtpu/worker.zig
+_ = stats.buffer_packets.fetchAdd(1, .seq_cst);
 
-// In statsThread
-const buffered = global_stats.buffer_packets.load(.seq_cst);
+// In stats.zig statsThread function
+const buffered = stats.buffer_packets.load(.seq_cst);
 print("Buffered Packets: {}\n", .{buffered});
 ```
 
@@ -942,14 +995,14 @@ print("Buffered Packets: {}\n", .{buffered});
 To change maximum sessions or PDRs/FARs per session:
 
 ```zig
-// In constants section (line 18)
-const MAX_SESSIONS = 200;  // Change from 100 to 200
+// In types.zig constants section (line 11)
+pub const MAX_SESSIONS = 200;  // Change from 100 to 200
 
-// In PDR/FAR arrays (lines 75-76)
+// In session.zig Session struct (lines 19-20)
 pdrs: [32]PDR,  // Change from 16 to 32
 fars: [32]FAR,  // Change from 16 to 32
 
-// Update checks in addPDR/addFAR (lines 105, 116)
+// Update checks in session.zig addPDR/addFAR (lines 49, 61)
 if (self.pdr_count >= 32) {  // Update from 16
     return error.TooManyPDRs;
 }
@@ -962,7 +1015,7 @@ if (self.pdr_count >= 32) {  // Update from 16
 Currently N6 forwarding only logs. To implement actual forwarding:
 
 ```zig
-// In worker thread, N6 case (line 440)
+// In gtpu/worker.zig, N6 case (around line 138)
 1 => { // Core (N6) - Forward to data network
     // 1. Create raw socket or TUN/TAP interface
     // 2. Extract inner IP packet from payload
@@ -1024,36 +1077,46 @@ To test N9 interface with multiple UPF instances:
 
 ### Current Limitations
 
-From README.md (lines 108-116):
+This is a simplified UPF implementation for educational and testing purposes:
 
-1. **Limited PFCP Support**: Only basic session establishment/deletion
-   - No Session Modification (type 52)
-   - No Session Report (type 56)
-   - No complete IE parsing
+1. **Limited PFCP Support**: Basic session lifecycle implemented
+   - ✅ Association Setup
+   - ✅ Session Establishment
+   - ✅ Session Modification (basic)
+   - ✅ Session Deletion
+   - ❌ Session Report (type 56)
+   - ❌ Usage Reporting
+   - ❌ Complete IE parsing
 
-2. **Simplified Packet Processing**: Currently logs and drops based on FAR rules
-   - No actual buffering
-   - No notification to SMF
+2. **Simplified Packet Processing**: Based on FAR rules
+   - ✅ Forward and Drop actions
+   - ❌ No actual buffering
+   - ❌ No notification to SMF
 
-3. **No N6 Interface**: Does not forward decapsulated packets to data network
+3. **Partial N6 Interface**: Does not forward decapsulated packets to data network
    - Counts as forwarded but doesn't actually send
    - Would require raw socket or TUN/TAP interface
+   - Requires routing and NAT setup
 
 4. **Partial N9 Interface**: Basic UPF-to-UPF forwarding
    - ✅ Re-encapsulation works
+   - ✅ Forwarding to peer UPF
    - ❌ No path management
+   - ❌ No redundancy/failover
    - ❌ No QoS between UPFs
 
 5. **No QoS Support**: QoS flows and QFI handling not implemented
    - No QFI parsing from GTP-U extension headers
    - No QER (QoS Enforcement Rules)
    - No rate limiting
+   - No traffic shaping
 
 6. **Simplified PDR/FAR**: Only basic TEID matching and forward/drop actions
    - No source IP matching
    - No destination IP matching
    - No port matching
    - No application ID matching
+   - No service data flow filters
 
 ### Known Issues
 
@@ -1166,11 +1229,16 @@ Total: ~10MB working set
 
 | What | Where |
 |------|-------|
-| Main code | `/home/user/PicoUP/src/upf.zig` |
+| Main entry point | `/home/user/PicoUP/src/upf.zig` |
+| Core types | `/home/user/PicoUP/src/types.zig` |
+| Session management | `/home/user/PicoUP/src/session.zig` |
+| Statistics | `/home/user/PicoUP/src/stats.zig` |
+| PFCP modules | `/home/user/PicoUP/src/pfcp/` |
+| GTP-U modules | `/home/user/PicoUP/src/gtpu/` |
 | Build config | `/home/user/PicoUP/build.zig` |
 | Dependencies | `/home/user/PicoUP/deps/` |
 | Executable | `/home/user/PicoUP/zig-out/bin/picoupf` |
-| Documentation | `/home/user/PicoUP/README.md` |
+| Documentation | `/home/user/PicoUP/README.md`, `CLAUDE.md` |
 
 ### Port Numbers
 
@@ -1183,11 +1251,11 @@ Total: ~10MB working set
 
 | Constant | Value | Location | Adjustable |
 |----------|-------|----------|------------|
-| WORKER_THREADS | 4 | upf.zig:14 | ✅ Yes |
-| QUEUE_SIZE | 1000 | upf.zig:15 | ✅ Yes |
-| PFCP_PORT | 8805 | upf.zig:16 | ✅ Yes |
-| GTPU_PORT | 2152 | upf.zig:17 | ✅ Yes |
-| MAX_SESSIONS | 100 | upf.zig:18 | ⚠️ Carefully |
+| WORKER_THREADS | 4 | types.zig:7 | ✅ Yes |
+| QUEUE_SIZE | 1000 | types.zig:8 | ✅ Yes |
+| PFCP_PORT | 8805 | types.zig:9 | ✅ Yes |
+| GTPU_PORT | 2152 | types.zig:10 | ✅ Yes |
+| MAX_SESSIONS | 100 | types.zig:11 | ⚠️ Carefully |
 
 ### Command Cheat Sheet
 
