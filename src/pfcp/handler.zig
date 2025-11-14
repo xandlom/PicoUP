@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const stats_mod = @import("../stats.zig");
+const session_mod = @import("../session.zig");
 const heartbeat = @import("heartbeat.zig");
 const association = @import("association.zig");
 const pfcp_session = @import("session.zig");
@@ -20,6 +21,7 @@ pub fn handlePfcpMessage(
     socket: std.posix.socket_t,
     allocator: std.mem.Allocator,
     stats: *stats_mod.Stats,
+    session_manager: *session_mod.SessionManager,
     pfcp_association_established: *Atomic(bool),
 ) void {
     _ = allocator;
@@ -44,13 +46,13 @@ pub fn handlePfcpMessage(
             association.handleAssociationSetup(socket, &header, &reader, client_addr, pfcp_association_established, stats);
         },
         .session_establishment_request => {
-            pfcp_session.handleSessionEstablishment(socket, &header, &reader, client_addr, pfcp_association_established, stats);
+            pfcp_session.handleSessionEstablishment(socket, &header, &reader, client_addr, session_manager, pfcp_association_established, stats);
         },
         .session_modification_request => {
-            pfcp_session.handleSessionModification(socket, &header, &reader, client_addr);
+            pfcp_session.handleSessionModification(socket, &header, &reader, client_addr, session_manager);
         },
         .session_deletion_request => {
-            pfcp_session.handleSessionDeletion(socket, &header, &reader, client_addr);
+            pfcp_session.handleSessionDeletion(socket, &header, &reader, client_addr, session_manager);
         },
         else => {
             print("PFCP: Unsupported message type: {}\n", .{msg_type});

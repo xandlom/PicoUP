@@ -20,14 +20,11 @@ pub fn handleSessionEstablishment(
     req_header: *const pfcp.types.PfcpHeader,
     reader: *pfcp.marshal.Reader,
     client_addr: net.Address,
+    session_manager: *session_mod.SessionManager,
     pfcp_association_established: *Atomic(bool),
     stats: *stats_mod.Stats,
 ) void {
     print("PFCP: Session Establishment Request received\n", .{});
-
-    // Import session_manager from parent scope - will be passed in when we refactor upf.zig
-    // For now, this is a compilation marker that we'll fix later
-    const session_manager = @import("../upf.zig").session_manager;
 
     // Check if PFCP association is established
     if (!pfcp_association_established.load(.seq_cst)) {
@@ -170,10 +167,9 @@ pub fn handleSessionModification(
     req_header: *const pfcp.types.PfcpHeader,
     reader: *pfcp.marshal.Reader,
     client_addr: net.Address,
+    session_manager: *session_mod.SessionManager,
 ) void {
     print("PFCP: Session Modification Request received\n", .{});
-
-    const session_manager = @import("../upf.zig").session_manager;
 
     const seid = req_header.seid orelse {
         print("PFCP: Session Modification Request missing SEID\n", .{});
@@ -235,11 +231,10 @@ pub fn handleSessionDeletion(
     req_header: *const pfcp.types.PfcpHeader,
     reader: *pfcp.marshal.Reader,
     client_addr: net.Address,
+    session_manager: *session_mod.SessionManager,
 ) void {
     print("PFCP: Session Deletion Request received\n", .{});
     _ = reader;
-
-    const session_manager = @import("../upf.zig").session_manager;
 
     const seid = req_header.seid orelse {
         print("PFCP: Session Deletion Request missing SEID\n", .{});
