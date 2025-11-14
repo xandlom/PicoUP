@@ -21,7 +21,7 @@ const MAX_SESSIONS = 100;
 const PDR = struct {
     id: u16,
     precedence: u32,
-    source_interface: u8, // 0=Access, 1=Core
+    source_interface: u8, // 0=Access (N3), 1=Core (N6), 2=N9 (UPF-to-UPF)
     teid: u32, // GTP-U TEID to match
     far_id: u16, // Associated FAR
     allocated: bool,
@@ -42,7 +42,7 @@ const PDR = struct {
 const FAR = struct {
     id: u16,
     action: u8, // 0=Drop, 1=Forward, 2=Buffer
-    dest_interface: u8, // 0=Access, 1=Core
+    dest_interface: u8, // 0=Access (N3), 1=Core (N6), 2=N9 (UPF-to-UPF)
     outer_header_creation: bool,
     teid: u32, // TEID for encapsulation
     ipv4: [4]u8, // Destination IP for encapsulation
@@ -300,6 +300,9 @@ const Stats = struct {
     gtpu_packets_rx: Atomic(u64),
     gtpu_packets_tx: Atomic(u64),
     gtpu_packets_dropped: Atomic(u64),
+    n3_packets_tx: Atomic(u64), // N3 (Access) transmit
+    n6_packets_tx: Atomic(u64), // N6 (Core) transmit
+    n9_packets_tx: Atomic(u64), // N9 (UPF-to-UPF) transmit
     queue_size: Atomic(usize),
     start_time: i64,
 
@@ -310,6 +313,9 @@ const Stats = struct {
             .gtpu_packets_rx = Atomic(u64).init(0),
             .gtpu_packets_tx = Atomic(u64).init(0),
             .gtpu_packets_dropped = Atomic(u64).init(0),
+            .n3_packets_tx = Atomic(u64).init(0),
+            .n6_packets_tx = Atomic(u64).init(0),
+            .n9_packets_tx = Atomic(u64).init(0),
             .queue_size = Atomic(usize).init(0),
             .start_time = time.timestamp(),
         };
@@ -350,6 +356,29 @@ fn parseGtpuHeader(data: []const u8) !struct { version: u8, message_type: u8, te
     };
 }
 
+// Create GTP-U header for encapsulation (N3/N9 interfaces)
+fn createGtpuHeader(buffer: []u8, teid: u32, payload: []const u8) usize {
+    if (buffer.len < 8 + payload.len) {
+        return 0; // Not enough space
+    }
+
+    // GTP-U header (8 bytes without extension headers)
+    buffer[0] = 0x30; // Version 1, PT=1, E=0, S=0, PN=0
+    buffer[1] = 0xFF; // Message Type: G-PDU
+
+    // Length (excluding first 8 bytes)
+    const length: u16 = @intCast(payload.len);
+    std.mem.writeInt(u16, buffer[2..4], length, .big);
+
+    // TEID
+    std.mem.writeInt(u32, buffer[4..8], teid, .big);
+
+    // Copy payload
+    @memcpy(buffer[8..8 + payload.len], payload);
+
+    return 8 + payload.len;
+}
+
 // Worker thread for processing GTP-U packets
 fn gtpuWorkerThread(thread_id: u32) void {
     print("GTP-U worker thread {} started\n", .{thread_id});
@@ -374,12 +403,88 @@ fn gtpuWorkerThread(thread_id: u32) void {
                                 // Extract inner payload
                                 const payload = packet.data[header.payload_offset..packet.length];
 
-                                print("Worker {}: Forwarding packet, TEID: 0x{x}, size: {} bytes\n",
-                                    .{ thread_id, header.teid, payload.len });
+                                switch (far.dest_interface) {
+                                    0 => { // Access (N3) - Forward to gNodeB
+                                        print("Worker {}: Forwarding to N3 (Access), TEID: 0x{x}, size: {} bytes\n",
+                                            .{ thread_id, header.teid, payload.len });
 
-                                // Simple forwarding: just drop for now
-                                // In real implementation, forward to N6 interface or re-encapsulate for N9
-                                _ = global_stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
+                                        if (far.outer_header_creation) {
+                                            // Re-encapsulate with GTP-U for N3
+                                            var out_buffer: [2048]u8 = undefined;
+                                            const out_len = createGtpuHeader(&out_buffer, far.teid, payload);
+
+                                            if (out_len > 0) {
+                                                // Create destination address for gNodeB
+                                                const dest_addr = net.Address.initIp4(far.ipv4, GTPU_PORT) catch {
+                                                    print("Worker {}: Invalid N3 destination address\n", .{thread_id});
+                                                    _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                                    continue;
+                                                };
+
+                                                _ = std.posix.sendto(packet.socket, out_buffer[0..out_len], 0, &dest_addr.any, dest_addr.getOsSockLen()) catch |err| {
+                                                    print("Worker {}: Failed to send to N3: {}\n", .{ thread_id, err });
+                                                    _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                                    continue;
+                                                };
+
+                                                _ = global_stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
+                                                _ = global_stats.n3_packets_tx.fetchAdd(1, .seq_cst);
+                                            } else {
+                                                _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                            }
+                                        } else {
+                                            print("Worker {}: N3 forwarding requires outer header creation\n", .{thread_id});
+                                            _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                        }
+                                    },
+                                    1 => { // Core (N6) - Forward to data network (decapsulated)
+                                        print("Worker {}: Forwarding to N6 (Core), TEID: 0x{x}, size: {} bytes\n",
+                                            .{ thread_id, header.teid, payload.len });
+
+                                        // For N6, we would send the decapsulated IP packet to the data network
+                                        // This requires a separate socket and routing setup
+                                        // For now, just count as forwarded
+                                        _ = global_stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
+                                        _ = global_stats.n6_packets_tx.fetchAdd(1, .seq_cst);
+                                    },
+                                    2 => { // N9 - Forward to peer UPF
+                                        print("Worker {}: Forwarding to N9 (UPF-to-UPF), TEID: 0x{x}, size: {} bytes, peer: {}.{}.{}.{}\n",
+                                            .{ thread_id, header.teid, payload.len, far.ipv4[0], far.ipv4[1], far.ipv4[2], far.ipv4[3] });
+
+                                        if (far.outer_header_creation) {
+                                            // Re-encapsulate with new GTP-U header for N9
+                                            var out_buffer: [2048]u8 = undefined;
+                                            const out_len = createGtpuHeader(&out_buffer, far.teid, payload);
+
+                                            if (out_len > 0) {
+                                                // Create destination address for peer UPF
+                                                const dest_addr = net.Address.initIp4(far.ipv4, GTPU_PORT) catch {
+                                                    print("Worker {}: Invalid N9 destination address\n", .{thread_id});
+                                                    _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                                    continue;
+                                                };
+
+                                                _ = std.posix.sendto(packet.socket, out_buffer[0..out_len], 0, &dest_addr.any, dest_addr.getOsSockLen()) catch |err| {
+                                                    print("Worker {}: Failed to send to N9: {}\n", .{ thread_id, err });
+                                                    _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                                    continue;
+                                                };
+
+                                                _ = global_stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
+                                                _ = global_stats.n9_packets_tx.fetchAdd(1, .seq_cst);
+                                            } else {
+                                                _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                            }
+                                        } else {
+                                            print("Worker {}: N9 forwarding requires outer header creation\n", .{thread_id});
+                                            _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                        }
+                                    },
+                                    else => { // Unknown interface
+                                        print("Worker {}: Unknown dest_interface: {}\n", .{ thread_id, far.dest_interface });
+                                        _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                                    }
+                                }
                             } else if (far.action == 0) { // Drop
                                 print("Worker {}: Dropping packet per FAR, TEID: 0x{x}\n", .{ thread_id, header.teid });
                                 _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
@@ -602,6 +707,9 @@ fn statsThread() void {
         const gtpu_rx = global_stats.gtpu_packets_rx.load(.seq_cst);
         const gtpu_tx = global_stats.gtpu_packets_tx.load(.seq_cst);
         const gtpu_drop = global_stats.gtpu_packets_dropped.load(.seq_cst);
+        const n3_tx = global_stats.n3_packets_tx.load(.seq_cst);
+        const n6_tx = global_stats.n6_packets_tx.load(.seq_cst);
+        const n9_tx = global_stats.n9_packets_tx.load(.seq_cst);
         const queue_sz = global_stats.queue_size.load(.seq_cst);
 
         const rx_rate = (gtpu_rx - last_rx) / 5;
@@ -615,6 +723,7 @@ fn statsThread() void {
         print("PFCP Messages: {}, Active Sessions: {}/{}\n", .{ pfcp_msgs, active_sessions, pfcp_sess });
         print("GTP-U RX: {}, TX: {}, Dropped: {}\n", .{ gtpu_rx, gtpu_tx, gtpu_drop });
         print("GTP-U Rate: {} pkt/s RX, {} pkt/s TX\n", .{ rx_rate, tx_rate });
+        print("Interface TX: N3={}, N6={}, N9={}\n", .{ n3_tx, n6_tx, n9_tx });
         print("Queue Size: {}\n", .{queue_sz});
         print("Worker Threads: {}\n", .{WORKER_THREADS});
         print("========================\n", .{});
