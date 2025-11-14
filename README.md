@@ -21,7 +21,7 @@ PicoUP is a simple, lightweight User Plane Function (UPF) implementation for 5G 
   - Statistics thread for monitoring
 
 - **Session Management**:
-  - Support for up to 10,000 concurrent PFCP sessions
+  - Support for up to 100 concurrent PFCP sessions
   - Each session can have up to 16 PDRs and 16 FARs
   - Thread-safe session lookup and management
 

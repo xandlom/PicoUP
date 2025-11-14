@@ -15,7 +15,7 @@ const WORKER_THREADS = 4;
 const QUEUE_SIZE = 1000;
 const PFCP_PORT = 8805;
 const GTPU_PORT = 2152;
-const MAX_SESSIONS = 10000;
+const MAX_SESSIONS = 100;
 
 // Packet Detection Rule (PDR)
 const PDR = struct {
