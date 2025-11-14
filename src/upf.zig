@@ -415,11 +415,7 @@ fn gtpuWorkerThread(thread_id: u32) void {
 
                                             if (out_len > 0) {
                                                 // Create destination address for gNodeB
-                                                const dest_addr = net.Address.initIp4(far.ipv4, GTPU_PORT) catch {
-                                                    print("Worker {}: Invalid N3 destination address\n", .{thread_id});
-                                                    _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
-                                                    continue;
-                                                };
+                                                const dest_addr = net.Address.initIp4(far.ipv4, GTPU_PORT);
 
                                                 _ = std.posix.sendto(packet.socket, out_buffer[0..out_len], 0, &dest_addr.any, dest_addr.getOsSockLen()) catch |err| {
                                                     print("Worker {}: Failed to send to N3: {}\n", .{ thread_id, err });
@@ -458,11 +454,7 @@ fn gtpuWorkerThread(thread_id: u32) void {
 
                                             if (out_len > 0) {
                                                 // Create destination address for peer UPF
-                                                const dest_addr = net.Address.initIp4(far.ipv4, GTPU_PORT) catch {
-                                                    print("Worker {}: Invalid N9 destination address\n", .{thread_id});
-                                                    _ = global_stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
-                                                    continue;
-                                                };
+                                                const dest_addr = net.Address.initIp4(far.ipv4, GTPU_PORT);
 
                                                 _ = std.posix.sendto(packet.socket, out_buffer[0..out_len], 0, &dest_addr.any, dest_addr.getOsSockLen()) catch |err| {
                                                     print("Worker {}: Failed to send to N9: {}\n", .{ thread_id, err });
