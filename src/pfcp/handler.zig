@@ -1,0 +1,59 @@
+// PFCP message handler - main message routing
+// Routes PFCP messages to appropriate handlers based on message type
+
+const std = @import("std");
+const stats_mod = @import("../stats.zig");
+const heartbeat = @import("heartbeat.zig");
+const association = @import("association.zig");
+const pfcp_session = @import("session.zig");
+
+const pfcp = @import("zig-pfcp");
+const net = std.net;
+const print = std.debug.print;
+const Atomic = std.atomic.Value;
+
+// Main PFCP message handler
+// Parses header and routes to appropriate handler based on message type
+pub fn handlePfcpMessage(
+    data: []const u8,
+    client_addr: net.Address,
+    socket: std.posix.socket_t,
+    allocator: std.mem.Allocator,
+    stats: *stats_mod.Stats,
+    pfcp_association_established: *Atomic(bool),
+) void {
+    _ = allocator;
+    _ = stats.pfcp_messages.fetchAdd(1, .seq_cst);
+
+    // Parse PFCP header using zig-pfcp library
+    var reader = pfcp.marshal.Reader.init(data);
+    const header = pfcp.marshal.decodePfcpHeader(&reader) catch |err| {
+        print("PFCP: Failed to decode header: {}\n", .{err});
+        return;
+    };
+
+    print("PFCP: Received message type {}, SEID: {?x}, seq: {}, from {}\n", .{ header.message_type, header.seid, header.sequence_number, client_addr });
+
+    // Handle different message types
+    const msg_type: pfcp.types.MessageType = @enumFromInt(header.message_type);
+    switch (msg_type) {
+        .heartbeat_request => {
+            heartbeat.handleHeartbeatRequest(socket, &header, client_addr, stats);
+        },
+        .association_setup_request => {
+            association.handleAssociationSetup(socket, &header, &reader, client_addr, pfcp_association_established, stats);
+        },
+        .session_establishment_request => {
+            pfcp_session.handleSessionEstablishment(socket, &header, &reader, client_addr, pfcp_association_established, stats);
+        },
+        .session_modification_request => {
+            pfcp_session.handleSessionModification(socket, &header, &reader, client_addr);
+        },
+        .session_deletion_request => {
+            pfcp_session.handleSessionDeletion(socket, &header, &reader, client_addr);
+        },
+        else => {
+            print("PFCP: Unsupported message type: {}\n", .{msg_type});
+        },
+    }
+}
