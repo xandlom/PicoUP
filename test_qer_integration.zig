@@ -214,15 +214,15 @@ const PfcpBuilder = struct {
         ie_data[2] = 0;
         ie_data[3] = 0;
         ie_data[4] = 1;
-        self.writeIE(.node_id, &ie_data);
+        self.writeIE(.node_id, ie_data[0..]);
     }
 
     pub fn writeFSEID(self: *PfcpBuilder, seid: u64, ipv4: [4]u8) void {
         var ie_data: [13]u8 = undefined;
         ie_data[0] = 0x02; // Flags: V4 present
         std.mem.writeInt(u64, ie_data[1..9], seid, .big);
-        @memcpy(ie_data[9..13], &ipv4);
-        self.writeIE(.f_seid, &ie_data);
+        @memcpy(ie_data[9..13], ipv4[0..]);
+        self.writeIE(.f_seid, ie_data[0..]);
     }
 };
 
@@ -237,8 +237,8 @@ fn sendAssociationSetupRequest(state: *TestState) !void {
     // Recovery Time Stamp IE
     const timestamp: u32 = @intCast(time.timestamp());
     var recovery_data: [4]u8 = undefined;
-    std.mem.writeInt(u32, &recovery_data, timestamp, .big);
-    builder.writeIE(.recovery_time_stamp, &recovery_data);
+    std.mem.writeInt(u32, recovery_data[0..], timestamp, .big);
+    builder.writeIE(.recovery_time_stamp, recovery_data[0..]);
 
     builder.updateMessageLength();
 
@@ -361,7 +361,7 @@ fn sendUplinkPackets(state: *TestState, count: u32) !void {
         @memset(&payload, @intCast(i % 256));
 
         // Build GTP-U packet
-        const packet_len = buildGtpuPacket(&packet_buf, state.config.uplink_teid, &payload);
+        const packet_len = buildGtpuPacket(&packet_buf, state.config.uplink_teid, payload[0..]);
 
         // Send packet
         _ = try std.posix.sendto(
@@ -392,7 +392,7 @@ fn sendDownlinkPackets(state: *TestState, count: u32) !void {
         @memset(&payload, @intCast((i + 100) % 256));
 
         // Build GTP-U packet
-        const packet_len = buildGtpuPacket(&packet_buf, state.config.downlink_teid, &payload);
+        const packet_len = buildGtpuPacket(&packet_buf, state.config.downlink_teid, payload[0..]);
 
         // Send packet
         _ = try std.posix.sendto(
