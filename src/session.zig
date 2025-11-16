@@ -70,15 +70,24 @@ pub const Session = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        var best_pdr: ?*PDR = null;
+        var highest_precedence: u32 = 0;
+
+        // Find all matching PDRs and select the one with highest precedence
+        // This handles cases where multiple PDRs have the same TEID
         for (0..self.pdr_count) |i| {
             if (self.pdrs[i].allocated and
                 self.pdrs[i].teid == teid and
                 self.pdrs[i].source_interface == source_interface)
             {
-                return &self.pdrs[i];
+                // First match or higher precedence
+                if (best_pdr == null or self.pdrs[i].precedence > highest_precedence) {
+                    best_pdr = &self.pdrs[i];
+                    highest_precedence = self.pdrs[i].precedence;
+                }
             }
         }
-        return null;
+        return best_pdr;
     }
 
     pub fn findFAR(self: *Session, far_id: u16) ?*FAR {
