@@ -79,6 +79,8 @@ pub const PDR = struct {
     far_id: u16, // Associated FAR
     qer_id: u16, // Associated QER ID (optional)
     has_qer: bool, // Whether QER is configured
+    urr_id: u16, // Associated URR ID (optional)
+    has_urr: bool, // Whether URR is configured
     allocated: bool,
 
     pub fn init(id: u16, precedence: u32, source_interface: u8, teid: u32, far_id: u16) PDR {
@@ -91,6 +93,8 @@ pub const PDR = struct {
             .far_id = far_id,
             .qer_id = 0,
             .has_qer = false,
+            .urr_id = 0,
+            .has_urr = false,
             .allocated = true,
         };
     }
@@ -99,6 +103,12 @@ pub const PDR = struct {
     pub fn setQER(self: *PDR, qer_id: u16) void {
         self.qer_id = qer_id;
         self.has_qer = true;
+    }
+
+    // Set URR reference
+    pub fn setURR(self: *PDR, urr_id: u16) void {
+        self.urr_id = urr_id;
+        self.has_urr = true;
     }
 
     // Legacy accessors for backward compatibility
@@ -213,5 +223,129 @@ pub const QER = struct {
         self.has_gbr = true;
         self.gbr_uplink = uplink;
         self.gbr_downlink = downlink;
+    }
+};
+
+// Usage Reporting Rule (URR)
+// Tracks data usage and triggers reports based on quotas/thresholds
+// Based on 3GPP TS 29.244 Section 5.2.1.10
+pub const URR = struct {
+    id: u16, // Unique URR identifier
+
+    // Measurement method flags
+    measure_volume: bool, // Track volume (bytes)
+    measure_duration: bool, // Track time duration
+
+    // Volume thresholds and quotas (in bytes)
+    has_volume_threshold: bool,
+    volume_threshold: u64, // Trigger report when reached
+
+    has_volume_quota: bool,
+    volume_quota: u64, // Hard limit - drop packets when exceeded
+
+    // Time thresholds and quotas (in seconds)
+    has_time_threshold: bool,
+    time_threshold: u32, // Trigger report after duration
+
+    has_time_quota: bool,
+    time_quota: u32, // Hard limit - drop packets when exceeded
+
+    // Reporting triggers
+    periodic_reporting: bool,
+    reporting_period: u32, // Period in seconds
+
+    // Current usage counters (atomic for thread safety)
+    volume_uplink: std.atomic.Value(u64), // Bytes uplink
+    volume_downlink: std.atomic.Value(u64), // Bytes downlink
+    volume_total: std.atomic.Value(u64), // Total bytes
+
+    // Timing
+    start_time: std.atomic.Value(i64), // When measurement started (ns)
+    last_report_time: std.atomic.Value(i64), // Last report timestamp (ns)
+
+    // Status flags
+    quota_exceeded: std.atomic.Value(bool), // Volume or time quota exceeded
+    report_pending: std.atomic.Value(bool), // Report needs to be sent to SMF
+
+    allocated: bool,
+    mutex: std.Thread.Mutex, // Protects counter updates
+
+    pub fn init(id: u16) URR {
+        const now = @as(i64, @intCast(std.time.nanoTimestamp()));
+        return URR{
+            .id = id,
+            .measure_volume = false,
+            .measure_duration = false,
+            .has_volume_threshold = false,
+            .volume_threshold = 0,
+            .has_volume_quota = false,
+            .volume_quota = 0,
+            .has_time_threshold = false,
+            .time_threshold = 0,
+            .has_time_quota = false,
+            .time_quota = 0,
+            .periodic_reporting = false,
+            .reporting_period = 0,
+            .volume_uplink = std.atomic.Value(u64).init(0),
+            .volume_downlink = std.atomic.Value(u64).init(0),
+            .volume_total = std.atomic.Value(u64).init(0),
+            .start_time = std.atomic.Value(i64).init(now),
+            .last_report_time = std.atomic.Value(i64).init(now),
+            .quota_exceeded = std.atomic.Value(bool).init(false),
+            .report_pending = std.atomic.Value(bool).init(false),
+            .allocated = true,
+            .mutex = std.Thread.Mutex{},
+        };
+    }
+
+    // Configure volume threshold (triggers report when reached)
+    pub fn setVolumeThreshold(self: *URR, threshold: u64) void {
+        self.has_volume_threshold = true;
+        self.volume_threshold = threshold;
+        self.measure_volume = true;
+    }
+
+    // Configure volume quota (hard limit)
+    pub fn setVolumeQuota(self: *URR, quota: u64) void {
+        self.has_volume_quota = true;
+        self.volume_quota = quota;
+        self.measure_volume = true;
+    }
+
+    // Configure time threshold
+    pub fn setTimeThreshold(self: *URR, threshold_seconds: u32) void {
+        self.has_time_threshold = true;
+        self.time_threshold = threshold_seconds;
+        self.measure_duration = true;
+    }
+
+    // Configure time quota
+    pub fn setTimeQuota(self: *URR, quota_seconds: u32) void {
+        self.has_time_quota = true;
+        self.time_quota = quota_seconds;
+        self.measure_duration = true;
+    }
+
+    // Configure periodic reporting
+    pub fn setPeriodicReporting(self: *URR, period_seconds: u32) void {
+        self.periodic_reporting = true;
+        self.reporting_period = period_seconds;
+    }
+
+    // Reset usage counters (called after report is sent)
+    pub fn resetCounters(self: *URR) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.volume_uplink.store(0, .seq_cst);
+        self.volume_downlink.store(0, .seq_cst);
+        self.volume_total.store(0, .seq_cst);
+
+        const now = @as(i64, @intCast(std.time.nanoTimestamp()));
+        self.start_time.store(now, .seq_cst);
+        self.last_report_time.store(now, .seq_cst);
+
+        self.quota_exceeded.store(false, .seq_cst);
+        self.report_pending.store(false, .seq_cst);
     }
 };
