@@ -127,3 +127,59 @@ fn sendAssociationSetupResponse(
         print("PFCP: Association Setup Response sent (cause: {})\n", .{cause_value});
     }
 }
+
+// Association Release Request handler
+pub fn handleAssociationRelease(
+    socket: std.posix.socket_t,
+    req_header: *const pfcp.types.PfcpHeader,
+    reader: *pfcp.marshal.Reader,
+    client_addr: net.Address,
+    pfcp_association_established: *Atomic(bool),
+) void {
+    print("PFCP: Association Release Request received from {}\n", .{client_addr});
+    _ = reader;
+
+    // Release the association
+    _ = pfcp_association_established.store(false, .seq_cst);
+    print("PFCP: Association released\n", .{});
+
+    // Send success response
+    sendAssociationReleaseResponse(socket, req_header, client_addr, .request_accepted);
+}
+
+// Helper: Send Association Release Response
+fn sendAssociationReleaseResponse(
+    socket: std.posix.socket_t,
+    req_header: *const pfcp.types.PfcpHeader,
+    client_addr: net.Address,
+    cause_value: pfcp.types.CauseValue,
+) void {
+    var response_buf: [256]u8 = undefined;
+    var writer = pfcp.marshal.Writer.init(&response_buf);
+
+    // Create response header (Association Release is a node message, no SEID)
+    var resp_header = pfcp.types.PfcpHeader.init(.association_release_response, false);
+    resp_header.sequence_number = req_header.sequence_number;
+
+    const header_start = writer.pos;
+    pfcp.marshal.encodePfcpHeader(&writer, resp_header) catch return;
+
+    // Encode mandatory IE: Cause
+    const cause = pfcp.ie.Cause.init(cause_value);
+    pfcp.marshal.encodeCause(&writer, cause) catch return;
+
+    // Update message length
+    const message_length: u16 = @intCast(writer.pos - header_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = header_start + 2;
+    _ = writer.writeU16(message_length) catch return;
+    writer.pos = saved_pos;
+
+    // Send response
+    const response = writer.getWritten();
+    _ = std.posix.sendto(socket, response, 0, &client_addr.any, client_addr.getOsSockLen()) catch {
+        print("PFCP: Failed to send Association Release Response\n", .{});
+    };
+
+    print("PFCP: Association Release Response sent (cause: {})\n", .{cause_value});
+}

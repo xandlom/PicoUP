@@ -45,6 +45,9 @@ pub fn handlePfcpMessage(
         .association_setup_request => {
             association.handleAssociationSetup(socket, &header, &reader, client_addr, pfcp_association_established, stats);
         },
+        .association_release_request => {
+            association.handleAssociationRelease(socket, &header, &reader, client_addr, pfcp_association_established);
+        },
         .session_establishment_request => {
             pfcp_session.handleSessionEstablishment(socket, &header, &reader, client_addr, session_manager, pfcp_association_established, stats);
         },
