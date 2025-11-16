@@ -91,7 +91,7 @@ pub fn handleSessionEstablishment(
         session.addFAR(far) catch {};
 
         _ = stats.pfcp_sessions.fetchAdd(1, .seq_cst);
-        print("PFCP: Created session with UP SEID 0x{x}, PDR TEID: 0x{x}\n", .{ up_seid, pdr.teid });
+        print("PFCP: Created session with UP SEID 0x{x}, PDR TEID: 0x{x}\n", .{ up_seid, pdr.getTeid() });
     }
 
     sendSessionEstablishmentResponse(socket, req_header, client_addr, up_seid, .request_accepted);

@@ -251,10 +251,16 @@ pub const SessionManager = struct {
 
             for (0..session.pdr_count) |j| {
                 if (session.pdrs[j].allocated and
-                    session.pdrs[j].teid == teid and
-                    session.pdrs[j].source_interface == source_interface)
+                    session.pdrs[j].pdi.source_interface == source_interface)
                 {
-                    return session;
+                    // Check F-TEID if present in PDI
+                    if (session.pdrs[j].pdi.has_fteid and session.pdrs[j].pdi.teid == teid) {
+                        return session;
+                    }
+                    // If no F-TEID is set, match on source_interface only
+                    if (!session.pdrs[j].pdi.has_fteid) {
+                        return session;
+                    }
                 }
             }
         }
