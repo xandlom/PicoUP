@@ -229,7 +229,7 @@ const FAR = struct {
 ```
 
 #### 3. Session - `session.zig:15`
-Represents a PFCP session with associated PDRs and FARs.
+Represents a PFCP session with associated PDRs, FARs, QERs, and URRs.
 
 ```zig
 const Session = struct {
@@ -238,14 +238,18 @@ const Session = struct {
     up_fseid: u64,              // User Plane F-SEID (local)
     pdrs: [16]PDR,             // Up to 16 PDRs per session
     fars: [16]FAR,             // Up to 16 FARs per session
+    qers: [16]QER,             // Up to 16 QERs per session
+    urrs: [16]URR,             // Up to 16 URRs per session
     pdr_count: u8,
     far_count: u8,
+    qer_count: u8,
+    urr_count: u8,
     allocated: bool,            // Whether this session slot is in use
-    mutex: Mutex,               // Thread-safe access to PDRs/FARs
+    mutex: Mutex,               // Thread-safe access to PDRs/FARs/QERs/URRs
 };
 ```
 
-**Important**: Each session has its own mutex to protect PDR/FAR arrays during concurrent access.
+**Important**: Each session has its own mutex to protect PDR/FAR/QER/URR arrays during concurrent access.
 
 #### 4. SessionManager - `session.zig:174`
 Global manager for all PFCP sessions.
@@ -294,41 +298,187 @@ const Stats = struct {
     n6_packets_tx: Atomic(u64),         // N6 interface transmissions
     n9_packets_tx: Atomic(u64),         // N9 interface transmissions
     queue_size: Atomic(usize),          // Current packet queue size
+
+    // QoS enforcement statistics
+    qos_packets_passed: Atomic(u64),    // Packets that passed QoS checks
+    qos_mbr_dropped: Atomic(u64),       // Packets dropped due to MBR limit
+    qos_pps_dropped: Atomic(u64),       // Packets dropped due to PPS limit
+
+    // URR statistics
+    urr_packets_tracked: Atomic(u64),   // Packets with usage tracked
+    urr_reports_triggered: Atomic(u64), // Number of reports triggered
+    urr_quota_exceeded: Atomic(u64),    // Packets dropped due to quota
+
     start_time: i64,                    // Server start timestamp
 };
 ```
 
 **All counters are atomic** to avoid race conditions when updated from multiple threads.
 
+#### 7. QER (QoS Enforcement Rule) - `types.zig:147`
+Defines QoS parameters and rate limiting for a flow.
+
+```zig
+const QER = struct {
+    id: u16,                            // Unique QER identifier
+    qfi: u8,                            // QoS Flow Identifier (0-63)
+
+    // Rate limiting parameters
+    has_mbr: bool,                      // Maximum Bit Rate configured
+    mbr_uplink: u64,                    // MBR uplink in bits/second
+    mbr_downlink: u64,                  // MBR downlink in bits/second
+
+    has_pps_limit: bool,                // Packets Per Second limit configured
+    pps_limit: u32,                     // Maximum packets per second
+
+    // Token bucket state for rate limiting
+    mbr_tokens: Atomic(u64),            // Available bits (for MBR)
+    pps_tokens: Atomic(u32),            // Available packets (for PPS)
+    last_refill: Atomic(i64),           // Timestamp of last token refill (ns)
+
+    allocated: bool,
+    mutex: Mutex,                       // Protects token bucket operations
+};
+```
+
+**Key Methods**:
+- `setMBR(uplink, downlink)` - Configure Maximum Bit Rate limits
+- `setPPS(limit)` - Configure Packets Per Second limit
+
+**Algorithm**: Token bucket algorithm for rate limiting. Tokens are refilled based on elapsed time and consumed per packet.
+
+#### 8. URR (Usage Reporting Rule) - `types.zig:222`
+Tracks data usage and triggers reports based on quotas/thresholds.
+
+```zig
+const URR = struct {
+    id: u16,                            // Unique URR identifier
+
+    // Measurement method flags
+    measure_volume: bool,               // Track volume (bytes)
+    measure_duration: bool,             // Track time duration
+
+    // Volume thresholds and quotas (in bytes)
+    has_volume_threshold: bool,
+    volume_threshold: u64,              // Trigger report when reached (soft limit)
+
+    has_volume_quota: bool,
+    volume_quota: u64,                  // Hard limit - drop packets when exceeded
+
+    // Time thresholds and quotas (in seconds)
+    has_time_threshold: bool,
+    time_threshold: u32,                // Trigger report after duration
+
+    has_time_quota: bool,
+    time_quota: u32,                    // Hard limit - drop packets when exceeded
+
+    // Reporting triggers
+    periodic_reporting: bool,
+    reporting_period: u32,              // Period in seconds
+
+    // Current usage counters (atomic for thread safety)
+    volume_uplink: Atomic(u64),         // Bytes uplink
+    volume_downlink: Atomic(u64),       // Bytes downlink
+    volume_total: Atomic(u64),          // Total bytes
+
+    // Timing
+    start_time: Atomic(i64),            // When measurement started (ns)
+    last_report_time: Atomic(i64),      // Last report timestamp (ns)
+
+    // Status flags
+    quota_exceeded: Atomic(bool),       // Volume or time quota exceeded
+    report_pending: Atomic(bool),       // Report needs to be sent to SMF
+
+    allocated: bool,
+    mutex: Mutex,                       // Protects counter updates
+};
+```
+
+**Key Methods**:
+- `setVolumeQuota(quota)` - Configure volume quota (hard limit)
+- `setVolumeThreshold(threshold)` - Configure volume threshold (soft limit)
+- `setTimeQuota(quota_seconds)` - Configure time quota
+- `setPeriodicReporting(period_seconds)` - Configure periodic reporting
+- `resetCounters()` - Reset usage counters (called after report is sent)
+
+**Quota vs Threshold**:
+- **Quota** (hard limit): Packets are dropped when quota is exceeded
+- **Threshold** (soft limit): Triggers a report but allows packets through
+
 ### Packet Processing Flow
 
-1. **GTP-U Thread** receives UDP packet on port 2152
-2. Parse GTP-U header to extract TEID
-3. Create `GtpuPacket` and enqueue to `PacketQueue`
-4. **Worker Thread** dequeues packet
-5. Find session by TEID using `SessionManager.findSessionByTeid()`
-6. Find matching PDR in session by TEID and source interface
-7. Find associated FAR using PDR's `far_id`
-8. Execute FAR action:
-   - **Drop** (0): Increment dropped counter
-   - **Forward** (1): Process based on `dest_interface`:
-     - **N3** (0): Re-encapsulate with GTP-U, send to gNodeB
-     - **N6** (1): Decapsulate, send to data network (currently just logs)
-     - **N9** (2): Re-encapsulate with GTP-U, send to peer UPF
+Complete pipeline as implemented in `gtpu/worker.zig`:
+
+1. **Stage 1 - Parse Header** (`parseHeader`):
+   - GTP-U Thread receives UDP packet on port 2152
+   - Parse GTP-U header to extract TEID
+   - Create `GtpuPacket` and enqueue to `PacketQueue`
+
+2. **Stage 2 - Lookup Session** (`lookupSession`):
+   - Worker Thread dequeues packet
+   - Find session by TEID using `SessionManager.findSessionByTeid()`
+
+3. **Stage 3 - Match PDR** (`matchPDR`):
+   - Find matching PDR in session by TEID and source interface
+   - Select highest precedence PDR if multiple matches
+
+4. **Stage 4 - Lookup FAR** (`lookupFAR`):
+   - Find associated FAR using PDR's `far_id`
+
+5. **Stage 5 - Lookup QER** (`lookupQER`) - *Optional*:
+   - If PDR has `has_qer` flag set, find associated QER using PDR's `qer_id`
+
+6. **Stage 6 - Enforce QoS** (`enforceQoS`) - *Optional*:
+   - If QER exists, apply token bucket rate limiting
+   - Check MBR (Maximum Bit Rate) and PPS (Packets Per Second) limits
+   - Drop packet if limits exceeded
+
+7. **Stage 7 - Lookup URR** (`lookupURR`) - *Optional*:
+   - If PDR has `has_urr` flag set, find associated URR using PDR's `urr_id`
+
+8. **Stage 8 - Track Usage** (`trackUsage`) - *Optional*:
+   - If URR exists, track volume and/or duration
+   - Check volume quota (hard limit) - drop packet if exceeded
+   - Check volume threshold (soft limit) - trigger report if reached
+   - Check time quota and threshold
+   - Handle periodic reporting triggers
+
+9. **Stage 9 - Execute FAR** (`executeFAR`):
+   - Execute FAR action based on `action` field:
+     - **Drop** (0): Increment dropped counter
+     - **Forward** (1): Process based on `dest_interface`:
+       - **N3** (0): Re-encapsulate with GTP-U, send to gNodeB
+       - **N6** (1): Decapsulate, send to data network (currently just logs)
+       - **N9** (2): Re-encapsulate with GTP-U, send to peer UPF
+     - **Buffer** (2): Not implemented - drops packet
+
+**Pipeline Summary**:
+```
+parseHeader → lookupSession → matchPDR → lookupFAR →
+lookupQER → enforceQoS → lookupURR → trackUsage → executeFAR
+```
+
+**Early Termination**: Each stage returns `bool`. If a stage returns `false`, the pipeline terminates early and the packet is dropped.
 
 ### Thread Safety
 
 The codebase uses multiple synchronization primitives:
 
 1. **Mutexes** - Protect critical sections:
-   - `Session.mutex` - Protects PDR/FAR arrays
+   - `Session.mutex` - Protects PDR/FAR/QER/URR arrays
    - `SessionManager.mutex` - Protects session creation/deletion
    - `PacketQueue.mutex` - Protects queue operations
+   - `QER.mutex` - Protects token bucket operations
+   - `URR.mutex` - Protects usage counter updates
 
 2. **Atomic Values** - Lock-free counters:
    - All statistics counters
    - Session count
    - Queue head/tail/count
+   - QER token buckets (`mbr_tokens`, `pps_tokens`, `last_refill`)
+   - URR usage counters (`volume_uplink`, `volume_downlink`, `volume_total`)
+   - URR timing (`start_time`, `last_report_time`)
+   - URR status flags (`quota_exceeded`, `report_pending`)
    - `should_stop` flag for graceful shutdown
 
 **Pattern**: Use `.seq_cst` (sequentially consistent) memory ordering for all atomic operations to ensure correctness.
@@ -1084,14 +1234,14 @@ This is a simplified UPF implementation for educational and testing purposes:
    - ✅ Session Establishment
    - ✅ Session Modification (basic)
    - ✅ Session Deletion
-   - ❌ Session Report (type 56)
-   - ❌ Usage Reporting
+   - ⚠️ Session Report (type 56) - URR triggers reports but PFCP reporting not implemented
+   - ⚠️ Usage Reporting - URR tracks usage locally, but PFCP Session Report not sent to SMF
    - ❌ Complete IE parsing
 
 2. **Simplified Packet Processing**: Based on FAR rules
    - ✅ Forward and Drop actions
    - ❌ No actual buffering
-   - ❌ No notification to SMF
+   - ❌ No notification to SMF for non-URR events
 
 3. **Partial N6 Interface**: Does not forward decapsulated packets to data network
    - Counts as forwarded but doesn't actually send
@@ -1105,18 +1255,31 @@ This is a simplified UPF implementation for educational and testing purposes:
    - ❌ No redundancy/failover
    - ❌ No QoS between UPFs
 
-5. **No QoS Support**: QoS flows and QFI handling not implemented
-   - No QFI parsing from GTP-U extension headers
-   - No QER (QoS Enforcement Rules)
-   - No rate limiting
-   - No traffic shaping
+5. **Partial QoS Support**: QER implemented with rate limiting
+   - ✅ QER (QoS Enforcement Rules) with MBR and PPS limits
+   - ✅ Token bucket rate limiting
+   - ✅ Traffic shaping via rate limits
+   - ❌ No QFI parsing from GTP-U extension headers
+   - ❌ No GBR (Guaranteed Bit Rate) enforcement
 
-6. **Simplified PDR/FAR**: Only basic TEID matching and forward/drop actions
-   - No source IP matching
-   - No destination IP matching
-   - No port matching
-   - No application ID matching
-   - No service data flow filters
+6. **Partial Usage Reporting**: URR implemented with volume/time tracking
+   - ✅ URR (Usage Reporting Rules) tracks volume and duration
+   - ✅ Volume quota (hard limit) enforcement
+   - ✅ Volume threshold (soft limit) triggers
+   - ✅ Time quota and threshold support
+   - ✅ Periodic reporting triggers
+   - ❌ PFCP Session Report messages not sent to SMF (reports only logged)
+   - ❌ No charging integration
+
+7. **Simplified PDR/FAR**: Basic TEID matching with extended PDI support
+   - ✅ TEID matching (F-TEID)
+   - ✅ Source interface matching
+   - ✅ UE IP address matching
+   - ✅ SDF filter (protocol, destination port range)
+   - ✅ Precedence-based PDR selection
+   - ⚠️ Application ID matching (PDI field exists, but no DPI logic)
+   - ❌ No source port matching
+   - ❌ No full 5-tuple matching
 
 ### Known Issues
 
@@ -1291,6 +1454,8 @@ PFCP Messages: 15, Active Sessions: 3/3
 GTP-U RX: 1500, TX: 1450, Dropped: 50
 GTP-U Rate: 50 pkt/s RX, 48 pkt/s TX
 Interface TX: N3=500, N6=800, N9=150
+QoS: Passed=1400, MBR Dropped=30, PPS Dropped=20
+URR: Tracked=1350, Reports=2, Quota Exceeded=5
 Queue Size: 0
 Worker Threads: 4
 ========================
