@@ -20,6 +20,12 @@ pub const Stats = struct {
     n6_packets_tx: Atomic(u64), // N6 (Core) transmit
     n9_packets_tx: Atomic(u64), // N9 (UPF-to-UPF) transmit
     queue_size: Atomic(usize),
+
+    // QoS enforcement statistics
+    qos_packets_passed: Atomic(u64), // Packets that passed QoS checks
+    qos_mbr_dropped: Atomic(u64), // Packets dropped due to MBR limit
+    qos_pps_dropped: Atomic(u64), // Packets dropped due to PPS limit
+
     start_time: i64,
 
     pub fn init() Stats {
@@ -33,6 +39,9 @@ pub const Stats = struct {
             .n6_packets_tx = Atomic(u64).init(0),
             .n9_packets_tx = Atomic(u64).init(0),
             .queue_size = Atomic(usize).init(0),
+            .qos_packets_passed = Atomic(u64).init(0),
+            .qos_mbr_dropped = Atomic(u64).init(0),
+            .qos_pps_dropped = Atomic(u64).init(0),
             .start_time = time.timestamp(),
         };
     }
@@ -58,6 +67,9 @@ pub fn statsThread(stats: *Stats, session_mgr: *session.SessionManager, should_s
         const n6_tx = stats.n6_packets_tx.load(.seq_cst);
         const n9_tx = stats.n9_packets_tx.load(.seq_cst);
         const queue_sz = stats.queue_size.load(.seq_cst);
+        const qos_passed = stats.qos_packets_passed.load(.seq_cst);
+        const qos_mbr_drop = stats.qos_mbr_dropped.load(.seq_cst);
+        const qos_pps_drop = stats.qos_pps_dropped.load(.seq_cst);
 
         const rx_rate = (gtpu_rx - last_rx) / 5;
         const tx_rate = (gtpu_tx - last_tx) / 5;
@@ -71,6 +83,7 @@ pub fn statsThread(stats: *Stats, session_mgr: *session.SessionManager, should_s
         print("GTP-U RX: {}, TX: {}, Dropped: {}\n", .{ gtpu_rx, gtpu_tx, gtpu_drop });
         print("GTP-U Rate: {} pkt/s RX, {} pkt/s TX\n", .{ rx_rate, tx_rate });
         print("Interface TX: N3={}, N6={}, N9={}\n", .{ n3_tx, n6_tx, n9_tx });
+        print("QoS: Passed={}, MBR Dropped={}, PPS Dropped={}\n", .{ qos_passed, qos_mbr_drop, qos_pps_drop });
         print("Queue Size: {}\n", .{queue_sz});
         print("Worker Threads: {}\n", .{types.WORKER_THREADS});
         print("========================\n", .{});

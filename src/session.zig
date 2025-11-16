@@ -11,15 +11,17 @@ const Atomic = std.atomic.Value;
 const print = std.debug.print;
 
 // PFCP Session
-// Represents a PFCP session with associated PDRs and FARs
+// Represents a PFCP session with associated PDRs, FARs, and QERs
 pub const Session = struct {
     seid: u64,
     cp_fseid: u64, // Control Plane F-SEID
     up_fseid: u64, // User Plane F-SEID (local)
     pdrs: [16]PDR,
     fars: [16]FAR,
+    qers: [16]types.QER, // QoS Enforcement Rules
     pdr_count: u8,
     far_count: u8,
+    qer_count: u8,
     allocated: bool,
     mutex: Mutex,
 
@@ -30,14 +32,17 @@ pub const Session = struct {
             .up_fseid = up_fseid,
             .pdrs = undefined,
             .fars = undefined,
+            .qers = undefined,
             .pdr_count = 0,
             .far_count = 0,
+            .qer_count = 0,
             .allocated = true,
             .mutex = Mutex{},
         };
         for (0..16) |i| {
             session.pdrs[i].allocated = false;
             session.fars[i].allocated = false;
+            session.qers[i].allocated = false;
         }
         return session;
     }
@@ -180,6 +185,74 @@ pub const Session = struct {
             }
         }
         return error.FARNotFound;
+    }
+
+    pub fn addQER(self: *Session, qer: types.QER) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.qer_count >= 16) {
+            return error.TooManyQERs;
+        }
+
+        self.qers[self.qer_count] = qer;
+        self.qer_count += 1;
+    }
+
+    pub fn findQER(self: *Session, qer_id: u16) ?*types.QER {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.qer_count) |i| {
+            if (self.qers[i].allocated and self.qers[i].id == qer_id) {
+                return &self.qers[i];
+            }
+        }
+        return null;
+    }
+
+    pub fn findQERById(self: *Session, qer_id: u16) ?*types.QER {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.qer_count) |i| {
+            if (self.qers[i].allocated and self.qers[i].id == qer_id) {
+                return &self.qers[i];
+            }
+        }
+        return null;
+    }
+
+    pub fn updateQER(self: *Session, qer: types.QER) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.qer_count) |i| {
+            if (self.qers[i].allocated and self.qers[i].id == qer.id) {
+                self.qers[i] = qer;
+                return;
+            }
+        }
+        return error.QERNotFound;
+    }
+
+    pub fn removeQER(self: *Session, qer_id: u16) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.qer_count) |i| {
+            if (self.qers[i].allocated and self.qers[i].id == qer_id) {
+                self.qers[i].allocated = false;
+                // Compact the array by shifting remaining QERs
+                var j = i;
+                while (j < self.qer_count - 1) : (j += 1) {
+                    self.qers[j] = self.qers[j + 1];
+                }
+                self.qer_count -= 1;
+                return;
+            }
+        }
+        return error.QERNotFound;
     }
 };
 
