@@ -13,6 +13,7 @@ const Atomic = std.atomic.Value;
 
 const PDR = types.PDR;
 const FAR = types.FAR;
+const QER = types.QER;
 
 // Session Establishment Request handler
 pub fn handleSessionEstablishment(
@@ -82,16 +83,30 @@ pub fn handleSessionEstablishment(
         return;
     };
 
-    // Create default PDR and FAR
+    // Create default PDR, FAR, and QER
+    // TODO: Parse Create PDR, Create FAR, Create QER IEs from PFCP message when zig-pfcp is available
     if (session_manager.findSession(up_seid)) |session| {
-        const pdr = PDR.init(1, 100, 0, 0x100, 1);
+        // Create QER with rate limiting (example: 1000 packets/second, 10 Mbps)
+        var qer = QER.init(1, 5); // QER ID 1, QFI 5
+        qer.setPPS(1000); // 1000 packets per second limit
+        qer.setMBR(10_000_000, 10_000_000); // 10 Mbps uplink/downlink
+
+        session.addQER(qer) catch {
+            print("PFCP: Failed to add QER to session\n", .{});
+        };
+
+        // Create PDR with QER association
+        var pdr = PDR.init(1, 100, 0, 0x100, 1);
+        pdr.setQER(1); // Associate PDR with QER ID 1
+
+        // Create FAR
         const far = FAR.init(1, 1, 1);
 
         session.addPDR(pdr) catch {};
         session.addFAR(far) catch {};
 
         _ = stats.pfcp_sessions.fetchAdd(1, .seq_cst);
-        print("PFCP: Created session with UP SEID 0x{x}, PDR TEID: 0x{x}\n", .{ up_seid, pdr.getTeid() });
+        print("PFCP: Created session with UP SEID 0x{x}, PDR TEID: 0x{x}, QER ID: {} (PPS: {}, MBR: {} bps)\n", .{ up_seid, pdr.getTeid(), qer.id, qer.pps_limit, qer.mbr_uplink });
     }
 
     sendSessionEstablishmentResponse(socket, req_header, client_addr, up_seid, .request_accepted);
