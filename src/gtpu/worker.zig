@@ -104,6 +104,7 @@ const PacketContext = struct {
     session: ?*session_mod.Session,
     pdr: ?*types.PDR,
     far: ?*types.FAR,
+    qer: ?*types.QER, // QoS Enforcement Rule
     payload: []const u8,
     source_interface: u8, // Determined from packet context
     thread_id: u32,
@@ -321,7 +322,103 @@ fn lookupFAR(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
     return false;
 }
 
-// Pipeline Stage 5: Execute FAR action (forward/drop)
+// Pipeline Stage 5: Lookup QER if PDR references one
+fn lookupQER(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
+    // Check if PDR has QER configured
+    if (ctx.pdr) |pdr| {
+        if (!pdr.has_qer) {
+            // No QER configured - skip QoS enforcement
+            ctx.qer = null;
+            return true;
+        }
+
+        if (ctx.session) |session| {
+            ctx.qer = session.findQER(pdr.qer_id);
+            if (ctx.qer == null) {
+                print("Worker {}: QER {} not found for PDR {}\n", .{ ctx.thread_id, pdr.qer_id, pdr.id });
+                _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// Pipeline Stage 6: Enforce QoS using token bucket algorithm
+fn enforceQoS(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
+    // No QER configured - allow packet through
+    if (ctx.qer == null) {
+        return true;
+    }
+
+    const qer = ctx.qer.?;
+    const payload_bits = ctx.payload.len * 8;
+    const now = @as(i64, @intCast(time.nanoTimestamp()));
+
+    qer.mutex.lock();
+    defer qer.mutex.unlock();
+
+    // Refill token buckets based on elapsed time
+    const last_refill = qer.last_refill.load(.seq_cst);
+    const elapsed_ns = @as(u64, @intCast(now - last_refill));
+    const elapsed_seconds = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
+
+    // Check PPS limit if configured
+    if (qer.has_pps_limit) {
+        // Refill PPS tokens: limit * elapsed_seconds
+        const pps_refill = @as(u32, @intFromFloat(@as(f64, @floatFromInt(qer.pps_limit)) * elapsed_seconds));
+        const current_pps = qer.pps_tokens.load(.seq_cst);
+        const new_pps = @min(current_pps + pps_refill, qer.pps_limit);
+        qer.pps_tokens.store(new_pps, .seq_cst);
+
+        // Check if we have tokens available
+        if (new_pps < 1) {
+            print("Worker {}: PPS limit exceeded (QER {}), dropping packet\n", .{ ctx.thread_id, qer.id });
+            _ = stats.qos_pps_dropped.fetchAdd(1, .seq_cst);
+            _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+            return false;
+        }
+
+        // Consume 1 packet token
+        qer.pps_tokens.store(new_pps - 1, .seq_cst);
+    }
+
+    // Check MBR limit if configured
+    if (qer.has_mbr) {
+        // Determine direction based on source interface
+        const mbr_limit = if (ctx.source_interface == 0) // N3 = uplink
+            qer.mbr_uplink
+        else // N6/N9 = downlink
+            qer.mbr_downlink;
+
+        // Refill MBR tokens: bits/second * elapsed_seconds
+        const mbr_refill = @as(u64, @intFromFloat(@as(f64, @floatFromInt(mbr_limit)) * elapsed_seconds));
+        const current_mbr = qer.mbr_tokens.load(.seq_cst);
+        const new_mbr = @min(current_mbr + mbr_refill, mbr_limit);
+        qer.mbr_tokens.store(new_mbr, .seq_cst);
+
+        // Check if we have enough tokens for this packet
+        if (new_mbr < payload_bits) {
+            print("Worker {}: MBR limit exceeded (QER {}), dropping packet ({} bits needed, {} available)\n", .{ ctx.thread_id, qer.id, payload_bits, new_mbr });
+            _ = stats.qos_mbr_dropped.fetchAdd(1, .seq_cst);
+            _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+            return false;
+        }
+
+        // Consume tokens
+        qer.mbr_tokens.store(new_mbr - payload_bits, .seq_cst);
+    }
+
+    // Update last refill timestamp
+    qer.last_refill.store(now, .seq_cst);
+
+    // Packet passed QoS checks
+    _ = stats.qos_packets_passed.fetchAdd(1, .seq_cst);
+    return true;
+}
+
+// Pipeline Stage 7: Execute FAR action (forward/drop)
 fn executeFAR(ctx: *PacketContext, stats: *stats_mod.Stats) void {
     if (ctx.far) |far| {
         switch (far.action) {
@@ -454,6 +551,7 @@ pub fn gtpuWorkerThread(
                 .session = null,
                 .pdr = null,
                 .far = null,
+                .qer = null,
                 .payload = undefined,
                 .source_interface = 0,
                 .thread_id = thread_id,
@@ -465,6 +563,8 @@ pub fn gtpuWorkerThread(
             if (!lookupSession(&ctx, session_manager, stats)) continue;
             if (!matchPDR(&ctx, stats)) continue;
             if (!lookupFAR(&ctx, stats)) continue;
+            if (!lookupQER(&ctx, stats)) continue;
+            if (!enforceQoS(&ctx, stats)) continue;
             executeFAR(&ctx, stats);
         } else {
             time.sleep(1 * time.ns_per_ms);
