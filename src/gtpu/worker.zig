@@ -105,6 +105,7 @@ const PacketContext = struct {
     pdr: ?*types.PDR,
     far: ?*types.FAR,
     qer: ?*types.QER, // QoS Enforcement Rule
+    urr: ?*types.URR, // Usage Reporting Rule
     payload: []const u8,
     source_interface: u8, // Determined from packet context
     thread_id: u32,
@@ -418,7 +419,129 @@ fn enforceQoS(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
     return true;
 }
 
-// Pipeline Stage 7: Execute FAR action (forward/drop)
+// Pipeline Stage 7: Lookup URR if PDR references one
+fn lookupURR(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
+    if (ctx.pdr) |pdr| {
+        if (!pdr.has_urr) {
+            ctx.urr = null;
+            return true; // No URR configured - continue
+        }
+
+        if (ctx.session) |session| {
+            ctx.urr = session.findURR(pdr.urr_id);
+            if (ctx.urr == null) {
+                print("Worker {}: URR {} not found for PDR {}\n", .{ ctx.thread_id, pdr.urr_id, pdr.id });
+                _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+                return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// Pipeline Stage 8: Track usage and enforce quotas
+fn trackUsage(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
+    if (ctx.urr == null) {
+        return true; // No URR - allow packet through
+    }
+
+    const urr = ctx.urr.?;
+    const payload_bytes = ctx.payload.len;
+    const now = @as(i64, @intCast(time.nanoTimestamp()));
+
+    urr.mutex.lock();
+    defer urr.mutex.unlock();
+
+    // Check if quota already exceeded
+    if (urr.quota_exceeded.load(.seq_cst)) {
+        print("Worker {}: URR {} quota exceeded, dropping packet\n", .{ ctx.thread_id, urr.id });
+        _ = stats.urr_quota_exceeded.fetchAdd(1, .seq_cst);
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return false;
+    }
+
+    // Track volume if enabled
+    if (urr.measure_volume) {
+        // Determine direction based on source interface
+        const is_uplink = (ctx.source_interface == 0); // N3 = uplink
+
+        if (is_uplink) {
+            _ = urr.volume_uplink.fetchAdd(payload_bytes, .seq_cst);
+        } else {
+            _ = urr.volume_downlink.fetchAdd(payload_bytes, .seq_cst);
+        }
+        _ = urr.volume_total.fetchAdd(payload_bytes, .seq_cst);
+
+        const total_volume = urr.volume_total.load(.seq_cst);
+
+        // Check volume quota (hard limit)
+        if (urr.has_volume_quota and total_volume >= urr.volume_quota) {
+            urr.quota_exceeded.store(true, .seq_cst);
+            urr.report_pending.store(true, .seq_cst);
+            print("Worker {}: URR {} volume quota reached ({} >= {} bytes)\n", .{ ctx.thread_id, urr.id, total_volume, urr.volume_quota });
+            _ = stats.urr_quota_exceeded.fetchAdd(1, .seq_cst);
+            _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+            return false;
+        }
+
+        // Check volume threshold (soft limit - trigger report)
+        if (urr.has_volume_threshold and total_volume >= urr.volume_threshold) {
+            if (!urr.report_pending.load(.seq_cst)) {
+                urr.report_pending.store(true, .seq_cst);
+                print("Worker {}: URR {} volume threshold reached ({} >= {} bytes), report pending\n", .{ ctx.thread_id, urr.id, total_volume, urr.volume_threshold });
+                _ = stats.urr_reports_triggered.fetchAdd(1, .seq_cst);
+            }
+        }
+    }
+
+    // Track duration if enabled
+    if (urr.measure_duration) {
+        const start = urr.start_time.load(.seq_cst);
+        const elapsed_ns = @as(u64, @intCast(now - start));
+        const elapsed_seconds = @as(u32, @intCast(elapsed_ns / 1_000_000_000));
+
+        // Check time quota (hard limit)
+        if (urr.has_time_quota and elapsed_seconds >= urr.time_quota) {
+            urr.quota_exceeded.store(true, .seq_cst);
+            urr.report_pending.store(true, .seq_cst);
+            print("Worker {}: URR {} time quota reached ({} >= {} seconds)\n", .{ ctx.thread_id, urr.id, elapsed_seconds, urr.time_quota });
+            _ = stats.urr_quota_exceeded.fetchAdd(1, .seq_cst);
+            _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+            return false;
+        }
+
+        // Check time threshold (soft limit - trigger report)
+        if (urr.has_time_threshold and elapsed_seconds >= urr.time_threshold) {
+            if (!urr.report_pending.load(.seq_cst)) {
+                urr.report_pending.store(true, .seq_cst);
+                print("Worker {}: URR {} time threshold reached ({} >= {} seconds), report pending\n", .{ ctx.thread_id, urr.id, elapsed_seconds, urr.time_threshold });
+                _ = stats.urr_reports_triggered.fetchAdd(1, .seq_cst);
+            }
+        }
+    }
+
+    // Check periodic reporting
+    if (urr.periodic_reporting) {
+        const last_report = urr.last_report_time.load(.seq_cst);
+        const since_report_ns = @as(u64, @intCast(now - last_report));
+        const since_report_sec = @as(u32, @intCast(since_report_ns / 1_000_000_000));
+
+        if (since_report_sec >= urr.reporting_period) {
+            if (!urr.report_pending.load(.seq_cst)) {
+                urr.report_pending.store(true, .seq_cst);
+                print("Worker {}: URR {} periodic report triggered ({} seconds)\n", .{ ctx.thread_id, urr.id, since_report_sec });
+                _ = stats.urr_reports_triggered.fetchAdd(1, .seq_cst);
+            }
+        }
+    }
+
+    // Packet passed usage tracking
+    _ = stats.urr_packets_tracked.fetchAdd(1, .seq_cst);
+    return true;
+}
+
+// Pipeline Stage 9: Execute FAR action (forward/drop)
 fn executeFAR(ctx: *PacketContext, stats: *stats_mod.Stats) void {
     if (ctx.far) |far| {
         switch (far.action) {
@@ -552,6 +675,7 @@ pub fn gtpuWorkerThread(
                 .pdr = null,
                 .far = null,
                 .qer = null,
+                .urr = null,
                 .payload = undefined,
                 .source_interface = 0,
                 .thread_id = thread_id,
@@ -565,6 +689,8 @@ pub fn gtpuWorkerThread(
             if (!lookupFAR(&ctx, stats)) continue;
             if (!lookupQER(&ctx, stats)) continue;
             if (!enforceQoS(&ctx, stats)) continue;
+            if (!lookupURR(&ctx, stats)) continue;
+            if (!trackUsage(&ctx, stats)) continue;
             executeFAR(&ctx, stats);
         } else {
             time.sleep(1 * time.ns_per_ms);

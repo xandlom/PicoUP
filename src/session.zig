@@ -11,7 +11,7 @@ const Atomic = std.atomic.Value;
 const print = std.debug.print;
 
 // PFCP Session
-// Represents a PFCP session with associated PDRs, FARs, and QERs
+// Represents a PFCP session with associated PDRs, FARs, QERs, and URRs
 pub const Session = struct {
     seid: u64,
     cp_fseid: u64, // Control Plane F-SEID
@@ -19,9 +19,11 @@ pub const Session = struct {
     pdrs: [16]PDR,
     fars: [16]FAR,
     qers: [16]types.QER, // QoS Enforcement Rules
+    urrs: [16]types.URR, // Usage Reporting Rules
     pdr_count: u8,
     far_count: u8,
     qer_count: u8,
+    urr_count: u8,
     allocated: bool,
     mutex: Mutex,
 
@@ -33,9 +35,11 @@ pub const Session = struct {
             .pdrs = undefined,
             .fars = undefined,
             .qers = undefined,
+            .urrs = undefined,
             .pdr_count = 0,
             .far_count = 0,
             .qer_count = 0,
+            .urr_count = 0,
             .allocated = true,
             .mutex = Mutex{},
         };
@@ -43,6 +47,7 @@ pub const Session = struct {
             session.pdrs[i].allocated = false;
             session.fars[i].allocated = false;
             session.qers[i].allocated = false;
+            session.urrs[i].allocated = false;
         }
         return session;
     }
@@ -253,6 +258,74 @@ pub const Session = struct {
             }
         }
         return error.QERNotFound;
+    }
+
+    pub fn addURR(self: *Session, urr: types.URR) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.urr_count >= 16) {
+            return error.TooManyURRs;
+        }
+
+        self.urrs[self.urr_count] = urr;
+        self.urr_count += 1;
+    }
+
+    pub fn findURR(self: *Session, urr_id: u16) ?*types.URR {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.urr_count) |i| {
+            if (self.urrs[i].allocated and self.urrs[i].id == urr_id) {
+                return &self.urrs[i];
+            }
+        }
+        return null;
+    }
+
+    pub fn findURRById(self: *Session, urr_id: u16) ?*types.URR {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.urr_count) |i| {
+            if (self.urrs[i].allocated and self.urrs[i].id == urr_id) {
+                return &self.urrs[i];
+            }
+        }
+        return null;
+    }
+
+    pub fn updateURR(self: *Session, urr: types.URR) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.urr_count) |i| {
+            if (self.urrs[i].allocated and self.urrs[i].id == urr.id) {
+                self.urrs[i] = urr;
+                return;
+            }
+        }
+        return error.URRNotFound;
+    }
+
+    pub fn removeURR(self: *Session, urr_id: u16) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (0..self.urr_count) |i| {
+            if (self.urrs[i].allocated and self.urrs[i].id == urr_id) {
+                self.urrs[i].allocated = false;
+                // Compact the array by shifting remaining URRs
+                var j = i;
+                while (j < self.urr_count - 1) : (j += 1) {
+                    self.urrs[j] = self.urrs[j + 1];
+                }
+                self.urr_count -= 1;
+                return;
+            }
+        }
+        return error.URRNotFound;
     }
 };
 
