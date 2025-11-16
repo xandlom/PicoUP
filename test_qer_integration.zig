@@ -13,42 +13,11 @@ const std = @import("std");
 const net = std.net;
 const print = std.debug.print;
 const time = std.time;
+const pfcp = @import("zig-pfcp");
 
 const PFCP_PORT = 8805;
 const GTPU_PORT = 2152;
 const UPF_ADDR = "127.0.0.1";
-
-// PFCP Message Types
-const PfcpMessageType = enum(u8) {
-    heartbeat_request = 1,
-    heartbeat_response = 2,
-    association_setup_request = 5,
-    association_setup_response = 6,
-    association_release_request = 7,
-    association_release_response = 8,
-    session_establishment_request = 50,
-    session_establishment_response = 51,
-    session_deletion_request = 54,
-    session_deletion_response = 55,
-};
-
-// PFCP IE Types
-const PfcpIEType = enum(u16) {
-    node_id = 60,
-    f_seid = 57,
-    cause = 19,
-    recovery_time_stamp = 96,
-};
-
-// PFCP Cause Values
-const PfcpCause = enum(u8) {
-    request_accepted = 1,
-    request_rejected = 64,
-    session_context_not_found = 65,
-    mandatory_ie_missing = 66,
-    no_established_pfcp_association = 69,
-    no_resources_available = 73,
-};
 
 // Test Configuration
 const TestConfig = struct {
@@ -126,123 +95,241 @@ const TestState = struct {
     }
 };
 
-// PFCP Message Builder
-const PfcpBuilder = struct {
-    buffer: [2048]u8,
-    pos: usize,
+// Helper to encode and send PFCP messages
+fn encodePfcpMessage(buffer: []u8, comptime encodeFunc: anytype, args: anytype) ![]const u8 {
+    var writer = pfcp.Writer.init(buffer);
+    try @call(.auto, encodeFunc, .{&writer} ++ args);
+    return writer.getWritten();
+}
 
-    pub fn init() PfcpBuilder {
-        return PfcpBuilder{
-            .buffer = undefined,
-            .pos = 0,
-        };
+// Helper to manually encode grouped IEs
+// Note: zig-pfcp doesn't have encode functions for CreatePDR/FAR/QER yet,
+// so we manually encode them following 3GPP TS 29.244
+
+fn encodeCreatePDR(writer: *pfcp.Writer, create_pdr: pfcp.ie.CreatePDR) !void {
+    const ie_start = writer.pos;
+
+    // IE Header: type (create_pdr = 1) + length (filled later)
+    try writer.writeU16(@intFromEnum(pfcp.types.IEType.create_pdr));
+    const length_pos = writer.pos;
+    try writer.writeU16(0); // placeholder
+
+    // PDR ID (IE type 56)
+    try writer.writeU16(@intFromEnum(pfcp.types.IEType.pdr_id));
+    try writer.writeU16(2); // length
+    try writer.writeU16(@intCast(create_pdr.pdr_id.rule_id));
+
+    // Precedence (IE type 29)
+    try writer.writeU16(@intFromEnum(pfcp.types.IEType.precedence));
+    try writer.writeU16(4); // length
+    try writer.writeU32(create_pdr.precedence.precedence);
+
+    // PDI (IE type 2) - grouped IE
+    const pdi_start = writer.pos;
+    try writer.writeU16(@intFromEnum(pfcp.types.IEType.pdi));
+    const pdi_length_pos = writer.pos;
+    try writer.writeU16(0); // placeholder
+
+    // Source Interface (IE type 20)
+    try writer.writeU16(@intFromEnum(pfcp.types.IEType.source_interface));
+    try writer.writeU16(1); // length
+    try writer.writeByte(@intFromEnum(create_pdr.pdi.source_interface.interface));
+
+    // F-TEID (IE type 21) if present
+    if (create_pdr.pdi.f_teid) |fteid| {
+        try pfcp.marshal.encodeFTEID(writer, fteid);
     }
 
-    pub fn writeByte(self: *PfcpBuilder, value: u8) void {
-        self.buffer[self.pos] = value;
-        self.pos += 1;
+    // Update PDI length
+    const pdi_length: u16 = @intCast(writer.pos - pdi_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = pdi_length_pos;
+    try writer.writeU16(pdi_length);
+    writer.pos = saved_pos;
+
+    // FAR ID (IE type not in enum, using raw value 108)
+    if (create_pdr.far_id) |far_id| {
+        try writer.writeU16(108); // FAR ID IE type
+        try writer.writeU16(4); // length
+        try writer.writeU32(far_id.far_id);
     }
 
-    pub fn writeU16(self: *PfcpBuilder, value: u16) void {
-        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], value, .big);
-        self.pos += 2;
+    // QER ID (IE type not in enum, using raw value 109)
+    if (create_pdr.qer_ids) |qer_ids| {
+        for (qer_ids) |qer_id| {
+            try writer.writeU16(109); // QER ID IE type
+            try writer.writeU16(4); // length
+            try writer.writeU32(qer_id.qer_id);
+        }
     }
 
-    pub fn writeU32(self: *PfcpBuilder, value: u32) void {
-        std.mem.writeInt(u32, self.buffer[self.pos..][0..4], value, .big);
-        self.pos += 4;
+    // Outer Header Removal (IE type not in enum, using raw value 95) if present
+    if (create_pdr.outer_header_removal) |ohr| {
+        try writer.writeU16(95); // Outer Header Removal IE type
+        try writer.writeU16(1); // length
+        try writer.writeByte(@intFromEnum(ohr.description));
     }
 
-    pub fn writeU64(self: *PfcpBuilder, value: u64) void {
-        std.mem.writeInt(u64, self.buffer[self.pos..][0..8], value, .big);
-        self.pos += 8;
-    }
+    // Update CreatePDR length
+    const ie_length: u16 = @intCast(writer.pos - ie_start - 4);
+    const final_pos = writer.pos;
+    writer.pos = length_pos;
+    try writer.writeU16(ie_length);
+    writer.pos = final_pos;
+}
 
-    pub fn writeBytes(self: *PfcpBuilder, bytes: []const u8) void {
-        @memcpy(self.buffer[self.pos..][0..bytes.len], bytes);
-        self.pos += bytes.len;
-    }
+fn encodeCreateFAR(writer: *pfcp.Writer, create_far: pfcp.ie.CreateFAR) !void {
+    const ie_start = writer.pos;
 
-    pub fn getBuffer(self: *PfcpBuilder) []u8 {
-        return self.buffer[0..self.pos];
-    }
+    // IE Header: type (create_far = 3) + length (filled later)
+    try writer.writeU16(@intFromEnum(pfcp.types.IEType.create_far));
+    const length_pos = writer.pos;
+    try writer.writeU16(0); // placeholder
 
-    pub fn buildPfcpHeader(self: *PfcpBuilder, msg_type: PfcpMessageType, has_seid: bool, seid: u64, seq: u32) void {
-        // Version (1) and flags
-        const flags: u8 = if (has_seid) 0x21 else 0x20; // Version 1, S flag if has_seid
-        self.writeByte(flags);
+    // FAR ID (IE type 108)
+    try writer.writeU16(108); // FAR ID IE type
+    try writer.writeU16(4); // length
+    try writer.writeU32(create_far.far_id.far_id);
 
-        // Message type
-        self.writeByte(@intFromEnum(msg_type));
+    // Apply Action (IE type 44)
+    try writer.writeU16(@intFromEnum(pfcp.types.IEType.apply_action));
+    try writer.writeU16(2); // length (2 bytes for packed struct)
+    try writer.writeU16(@bitCast(create_far.apply_action.actions));
 
-        // Message length (placeholder, will be updated)
-        self.writeU16(0);
+    // Forwarding Parameters (IE type 4) if present
+    if (create_far.forwarding_parameters) |fwd_params| {
+        const fwd_start = writer.pos;
+        try writer.writeU16(@intFromEnum(pfcp.types.IEType.forwarding_parameters));
+        const fwd_length_pos = writer.pos;
+        try writer.writeU16(0); // placeholder
 
-        // SEID (if present)
-        if (has_seid) {
-            self.writeU64(seid);
+        // Destination Interface (IE type 42)
+        try writer.writeU16(@intFromEnum(pfcp.types.IEType.destination_interface));
+        try writer.writeU16(1); // length
+        try writer.writeByte(@intFromEnum(fwd_params.destination_interface.interface));
+
+        // Outer Header Creation (IE type 84) if present
+        if (fwd_params.outer_header_creation) |ohc| {
+            try writer.writeU16(@intFromEnum(pfcp.types.IEType.outer_header_creation));
+
+            // Calculate length: 1 byte flags + optional fields
+            var ohc_length: u16 = 1; // flags byte
+            if (ohc.teid != null) ohc_length += 4;
+            if (ohc.ipv4 != null) ohc_length += 4;
+            if (ohc.ipv6 != null) ohc_length += 16;
+            if (ohc.port != null) ohc_length += 2;
+            if (ohc.ctag != null) ohc_length += 2;
+            if (ohc.stag != null) ohc_length += 2;
+
+            try writer.writeU16(ohc_length);
+
+            // Flags byte
+            try writer.writeByte(@bitCast(ohc.flags));
+
+            // Optional fields
+            if (ohc.teid) |teid| {
+                try writer.writeU32(teid);
+            }
+            if (ohc.ipv4) |ipv4| {
+                try writer.writeBytes(&ipv4);
+            }
+            if (ohc.ipv6) |ipv6| {
+                try writer.writeBytes(&ipv6);
+            }
+            if (ohc.port) |port| {
+                try writer.writeU16(port);
+            }
+            if (ohc.ctag) |ctag| {
+                try writer.writeU16(ctag);
+            }
+            if (ohc.stag) |stag| {
+                try writer.writeU16(stag);
+            }
         }
 
-        // Sequence number (3 bytes) + spare (1 byte)
-        self.writeByte(@intCast((seq >> 16) & 0xFF));
-        self.writeByte(@intCast((seq >> 8) & 0xFF));
-        self.writeByte(@intCast(seq & 0xFF));
-        self.writeByte(0); // Spare
+        // Update Forwarding Parameters length
+        const fwd_length: u16 = @intCast(writer.pos - fwd_start - 4);
+        const saved_pos = writer.pos;
+        writer.pos = fwd_length_pos;
+        try writer.writeU16(fwd_length);
+        writer.pos = saved_pos;
     }
 
-    pub fn updateMessageLength(self: *PfcpBuilder) void {
-        const header_size = 4; // First 4 bytes (version, type, length)
-        const message_length: u16 = @intCast(self.pos - header_size);
-        std.mem.writeInt(u16, self.buffer[2..4], message_length, .big);
+    // Update CreateFAR length
+    const ie_length: u16 = @intCast(writer.pos - ie_start - 4);
+    const final_pos = writer.pos;
+    writer.pos = length_pos;
+    try writer.writeU16(ie_length);
+    writer.pos = final_pos;
+}
+
+fn encodeCreateQER(writer: *pfcp.Writer, create_qer: pfcp.ie.CreateQER) !void {
+    const ie_start = writer.pos;
+
+    // IE Header: type (create_qer = 7) + length (filled later)
+    try writer.writeU16(@intFromEnum(pfcp.types.IEType.create_qer));
+    const length_pos = writer.pos;
+    try writer.writeU16(0); // placeholder
+
+    // QER ID (IE type 109)
+    try writer.writeU16(109); // QER ID IE type
+    try writer.writeU16(4); // length
+    try writer.writeU32(create_qer.qer_id.qer_id);
+
+    // Gate Status (IE type 25) if present
+    if (create_qer.gate_status) |gate| {
+        try writer.writeU16(@intFromEnum(pfcp.types.IEType.gate_status));
+        try writer.writeU16(1); // length
+        // Pack UL (bits 0-1) and DL (bits 2-3) into a single byte
+        const gate_byte: u8 = (@as(u8, @intFromEnum(gate.dl_gate)) << 2) | @as(u8, @intFromEnum(gate.ul_gate));
+        try writer.writeByte(gate_byte);
     }
 
-    pub fn writeIE(self: *PfcpBuilder, ie_type: PfcpIEType, data: []const u8) void {
-        // IE Type (2 bytes)
-        self.writeU16(@intFromEnum(ie_type));
-
-        // IE Length (2 bytes)
-        self.writeU16(@intCast(data.len));
-
-        // IE Data
-        self.writeBytes(data);
+    // MBR (IE type 26) if present
+    if (create_qer.mbr) |mbr| {
+        try writer.writeU16(@intFromEnum(pfcp.types.IEType.mbr));
+        try writer.writeU16(10); // length (5 bytes uplink + 5 bytes downlink)
+        // Uplink (40 bits)
+        try writer.writeByte(@intCast((mbr.ul_mbr >> 32) & 0xFF));
+        try writer.writeU32(@intCast(mbr.ul_mbr & 0xFFFFFFFF));
+        // Downlink (40 bits)
+        try writer.writeByte(@intCast((mbr.dl_mbr >> 32) & 0xFF));
+        try writer.writeU32(@intCast(mbr.dl_mbr & 0xFFFFFFFF));
     }
 
-    pub fn writeNodeId(self: *PfcpBuilder) void {
-        var ie_data: [5]u8 = undefined;
-        ie_data[0] = 0; // Type: IPv4
-        ie_data[1] = 127; // 127.0.0.1
-        ie_data[2] = 0;
-        ie_data[3] = 0;
-        ie_data[4] = 1;
-        self.writeIE(.node_id, ie_data[0..]);
+    // GBR (IE type 27) if present
+    if (create_qer.gbr) |gbr| {
+        try writer.writeU16(@intFromEnum(pfcp.types.IEType.gbr));
+        try writer.writeU16(10); // length (5 bytes uplink + 5 bytes downlink)
+        // Uplink (40 bits)
+        try writer.writeByte(@intCast((gbr.ul_gbr >> 32) & 0xFF));
+        try writer.writeU32(@intCast(gbr.ul_gbr & 0xFFFFFFFF));
+        // Downlink (40 bits)
+        try writer.writeByte(@intCast((gbr.dl_gbr >> 32) & 0xFF));
+        try writer.writeU32(@intCast(gbr.dl_gbr & 0xFFFFFFFF));
     }
 
-    pub fn writeFSEID(self: *PfcpBuilder, seid: u64, ipv4: [4]u8) void {
-        var ie_data: [13]u8 = undefined;
-        ie_data[0] = 0x02; // Flags: V4 present
-        std.mem.writeInt(u64, ie_data[1..9], seid, .big);
-        @memcpy(ie_data[9..13], ipv4[0..]);
-        self.writeIE(.f_seid, ie_data[0..]);
-    }
-};
+    // Update CreateQER length
+    const ie_length: u16 = @intCast(writer.pos - ie_start - 4);
+    const final_pos = writer.pos;
+    writer.pos = length_pos;
+    try writer.writeU16(ie_length);
+    writer.pos = final_pos;
+}
 
 // Send PFCP Association Setup Request
 fn sendAssociationSetupRequest(state: *TestState) !void {
     print("\n=== Sending PFCP Association Setup Request ===\n", .{});
 
-    var builder = PfcpBuilder.init();
-    builder.buildPfcpHeader(.association_setup_request, false, 0, state.nextSequenceNumber());
-    builder.writeNodeId();
+    // Build PFCP message using zig-pfcp
+    const node_id = pfcp.ie.NodeId.initIpv4([_]u8{ 127, 0, 0, 1 });
+    const recovery = pfcp.ie.RecoveryTimeStamp.fromUnixTime(time.timestamp());
+    const request = pfcp.AssociationSetupRequest.init(node_id, recovery);
 
-    // Recovery Time Stamp IE
-    const timestamp: u32 = @intCast(time.timestamp());
-    var recovery_data: [4]u8 = undefined;
-    std.mem.writeInt(u32, recovery_data[0..], timestamp, .big);
-    builder.writeIE(.recovery_time_stamp, recovery_data[0..]);
+    // Encode message
+    var msg_buffer: [2048]u8 = undefined;
+    const msg = try encodePfcpMessage(&msg_buffer, pfcp.marshal.encodeAssociationSetupRequest, .{ request, @as(u24, @intCast(state.nextSequenceNumber())) });
 
-    builder.updateMessageLength();
-
-    const msg = builder.getBuffer();
     _ = try std.posix.sendto(
         state.pfcp_socket,
         msg,
@@ -260,7 +347,7 @@ fn sendAssociationSetupRequest(state: *TestState) !void {
     if (bytes >= 8) {
         const msg_type = response_buf[1];
         print("Received response: message type = {}\n", .{msg_type});
-        if (msg_type == @intFromEnum(PfcpMessageType.association_setup_response)) {
+        if (msg_type == @intFromEnum(pfcp.types.MessageType.association_setup_response)) {
             print("✓ Association established successfully\n", .{});
         } else {
             print("✗ Unexpected response type\n", .{});
@@ -268,30 +355,111 @@ fn sendAssociationSetupRequest(state: *TestState) !void {
     }
 }
 
-// Send PFCP Session Establishment Request (simplified)
+// Send PFCP Session Establishment Request with PDRs, FARs, and QER
 fn sendSessionEstablishmentRequest(state: *TestState) !void {
     print("\n=== Sending PFCP Session Establishment Request ===\n", .{});
     print("Creating session with:\n", .{});
-    print("  - Uplink PDR: ID={}, TEID=0x{x}\n", .{ state.config.uplink_pdr_id, state.config.uplink_teid });
-    print("  - Downlink PDR: ID={}, TEID=0x{x}\n", .{ state.config.downlink_pdr_id, state.config.downlink_teid });
-    print("  - QER: ID={} (will be created by UPF with default limits)\n", .{state.config.qer_id});
+    print("  - Uplink PDR: ID={}, TEID=0x{x}, FAR={}, QER={}\n", .{ state.config.uplink_pdr_id, state.config.uplink_teid, state.config.uplink_far_id, state.config.qer_id });
+    print("  - Downlink PDR: ID={}, TEID=0x{x}, FAR={}, QER={}\n", .{ state.config.downlink_pdr_id, state.config.downlink_teid, state.config.downlink_far_id, state.config.qer_id });
+    print("  - Uplink FAR: ID={}, action=forward, dest=core(N6)\n", .{state.config.uplink_far_id});
+    print("  - Downlink FAR: ID={}, action=forward, dest=access(N3), GTP-U encap\n", .{state.config.downlink_far_id});
+    print("  - QER: ID={}, MBR=10Mbps UL/DL\n", .{state.config.qer_id});
 
-    var builder = PfcpBuilder.init();
-    builder.buildPfcpHeader(
-        .session_establishment_request,
-        true,
-        state.config.cp_seid,
-        state.nextSequenceNumber(),
+    // Build PFCP Session Establishment Request manually
+    var msg_buffer: [2048]u8 = undefined;
+    var writer = pfcp.Writer.init(&msg_buffer);
+
+    const seq_num: u24 = @intCast(state.nextSequenceNumber());
+
+    // PFCP Header
+    const header_start = writer.pos;
+    var header = pfcp.types.PfcpHeader.init(.session_establishment_request, true);
+    header.seid = state.config.cp_seid;
+    header.sequence_number = seq_num;
+    try pfcp.marshal.encodePfcpHeader(&writer, header);
+
+    // Node ID
+    const node_id = pfcp.ie.NodeId.initIpv4([_]u8{ 127, 0, 0, 1 });
+    try pfcp.marshal.encodeNodeId(&writer, node_id);
+
+    // F-SEID
+    const cp_fseid = pfcp.ie.FSEID.initV4(state.config.cp_seid, [_]u8{ 127, 0, 0, 1 });
+    try pfcp.marshal.encodeFSEID(&writer, cp_fseid);
+
+    // Create Uplink PDR (access → core)
+    const uplink_pdr_pdi = pfcp.ie.PDI.init(pfcp.ie.SourceInterface.init(.access))
+        .withFTeid(pfcp.ie.FTEID.initV4(state.config.uplink_teid, [_]u8{ 127, 0, 0, 1 }));
+
+    var uplink_pdr = pfcp.ie.CreatePDR.init(
+        pfcp.ie.PDRID.init(state.config.uplink_pdr_id),
+        pfcp.ie.Precedence.init(100),
+        uplink_pdr_pdi,
+    ).withFarId(pfcp.ie.FARID.init(state.config.uplink_far_id))
+        .withOuterHeaderRemoval(pfcp.ie.OuterHeaderRemoval.gtpuUdpIpv4()); // Remove GTP-U header
+
+    // Add QER reference to uplink PDR
+    const uplink_qer_ids: []const pfcp.ie.QERID = &[_]pfcp.ie.QERID{pfcp.ie.QERID.init(state.config.qer_id)};
+    uplink_pdr.qer_ids = @constCast(uplink_qer_ids);
+
+    try encodeCreatePDR(&writer, uplink_pdr);
+
+    // Create Downlink PDR (core → access)
+    const downlink_pdr_pdi = pfcp.ie.PDI.init(pfcp.ie.SourceInterface.init(.core));
+
+    var downlink_pdr = pfcp.ie.CreatePDR.init(
+        pfcp.ie.PDRID.init(state.config.downlink_pdr_id),
+        pfcp.ie.Precedence.init(100),
+        downlink_pdr_pdi,
+    ).withFarId(pfcp.ie.FARID.init(state.config.downlink_far_id));
+
+    // Add QER reference to downlink PDR
+    const downlink_qer_ids: []const pfcp.ie.QERID = &[_]pfcp.ie.QERID{pfcp.ie.QERID.init(state.config.qer_id)};
+    downlink_pdr.qer_ids = @constCast(downlink_qer_ids);
+
+    try encodeCreatePDR(&writer, downlink_pdr);
+
+    // Create Uplink FAR (forward to core/N6)
+    const uplink_far = pfcp.ie.CreateFAR.forward(
+        pfcp.ie.FARID.init(state.config.uplink_far_id),
+        pfcp.ie.DestinationInterface.init(.core),
     );
 
-    builder.writeNodeId();
+    try encodeCreateFAR(&writer, uplink_far);
 
-    // F-SEID (CP)
-    builder.writeFSEID(state.config.cp_seid, .{ 127, 0, 0, 1 });
+    // Create Downlink FAR (forward to access/N3 with GTP-U encapsulation)
+    const downlink_fwd_params = pfcp.ie.ForwardingParameters.init(pfcp.ie.DestinationInterface.init(.access))
+        .withOuterHeaderCreation(pfcp.ie.OuterHeaderCreation.initGtpuV4(
+        state.config.downlink_teid,
+        [_]u8{ 127, 0, 0, 1 },
+    ));
 
-    builder.updateMessageLength();
+    const downlink_far = pfcp.ie.CreateFAR.init(
+        pfcp.ie.FARID.init(state.config.downlink_far_id),
+        pfcp.ie.ApplyAction.forward(),
+    ).withForwardingParameters(downlink_fwd_params);
 
-    const msg = builder.getBuffer();
+    try encodeCreateFAR(&writer, downlink_far);
+
+    // Create QER with MBR limits (10 Mbps = 10,000,000 bps)
+    const qer = pfcp.ie.CreateQER.withRates(
+        pfcp.ie.QERID.init(state.config.qer_id),
+        10_000_000, // UL MBR
+        10_000_000, // DL MBR
+        0, // UL GBR (not set)
+        0, // DL GBR (not set)
+    );
+
+    try encodeCreateQER(&writer, qer);
+
+    // Update message length in header
+    const message_length: u16 = @intCast(writer.pos - header_start - 4);
+    const saved_pos = writer.pos;
+    writer.pos = header_start + 2;
+    try writer.writeU16(message_length);
+    writer.pos = saved_pos;
+
+    const msg = writer.getWritten();
+
     _ = try std.posix.sendto(
         state.pfcp_socket,
         msg,
@@ -310,12 +478,11 @@ fn sendSessionEstablishmentRequest(state: *TestState) !void {
         const msg_type = response_buf[1];
         print("Received response: message type = {}\n", .{msg_type});
 
-        if (msg_type == @intFromEnum(PfcpMessageType.session_establishment_response)) {
+        if (msg_type == @intFromEnum(pfcp.types.MessageType.session_establishment_response)) {
             // Parse UP F-SEID from response (simplified)
             // In real implementation, would properly parse IEs
             print("✓ Session established successfully\n", .{});
-            print("Note: UPF created default PDR (TEID=0x100), FAR, and QER\n", .{});
-            print("      QER limits: PPS=1000, MBR=10Mbps\n", .{});
+            print("Session configured with full PDR/FAR/QER rules\n", .{});
         } else {
             print("✗ Unexpected response type\n", .{});
         }
@@ -414,17 +581,28 @@ fn sendDownlinkPackets(state: *TestState, count: u32) !void {
 fn sendSessionDeletionRequest(state: *TestState) !void {
     print("\n=== Sending PFCP Session Deletion Request ===\n", .{});
 
-    var builder = PfcpBuilder.init();
-    builder.buildPfcpHeader(
-        .session_deletion_request,
-        true,
-        state.config.cp_seid,
-        state.nextSequenceNumber(),
-    );
+    // Build PFCP header manually since zig-pfcp doesn't have encode function for this yet
+    var msg_buffer: [2048]u8 = undefined;
+    var writer = pfcp.Writer.init(&msg_buffer);
 
-    builder.updateMessageLength();
+    const header = pfcp.types.PfcpHeader{
+        .version = pfcp.types.PFCP_VERSION,
+        .mp = false,
+        .s = true,
+        .message_type = @intFromEnum(pfcp.types.MessageType.session_deletion_request),
+        .message_length = 0, // Will calculate later
+        .seid = state.config.cp_seid,
+        .sequence_number = @intCast(state.nextSequenceNumber()),
+        .spare3 = 0,
+    };
 
-    const msg = builder.getBuffer();
+    try pfcp.marshal.encodePfcpHeader(&writer, header);
+
+    // Update message length
+    const msg_len: u16 = @intCast(writer.pos - 4); // Exclude first 4 bytes (version, type, length)
+    std.mem.writeInt(u16, msg_buffer[2..4], msg_len, .big);
+
+    const msg = writer.getWritten();
     _ = try std.posix.sendto(
         state.pfcp_socket,
         msg,
@@ -442,7 +620,7 @@ fn sendSessionDeletionRequest(state: *TestState) !void {
     if (bytes >= 8) {
         const msg_type = response_buf[1];
         print("Received response: message type = {}\n", .{msg_type});
-        if (msg_type == @intFromEnum(PfcpMessageType.session_deletion_response)) {
+        if (msg_type == @intFromEnum(pfcp.types.MessageType.session_deletion_response)) {
             print("✓ Session deleted successfully\n", .{});
         } else {
             print("✗ Unexpected response type\n", .{});
@@ -454,12 +632,32 @@ fn sendSessionDeletionRequest(state: *TestState) !void {
 fn sendAssociationReleaseRequest(state: *TestState) !void {
     print("\n=== Sending PFCP Association Release Request ===\n", .{});
 
-    var builder = PfcpBuilder.init();
-    builder.buildPfcpHeader(.association_release_request, false, 0, state.nextSequenceNumber());
-    builder.writeNodeId();
-    builder.updateMessageLength();
+    // Build PFCP header manually since zig-pfcp doesn't have encode function for this yet
+    var msg_buffer: [2048]u8 = undefined;
+    var writer = pfcp.Writer.init(&msg_buffer);
 
-    const msg = builder.getBuffer();
+    const header = pfcp.types.PfcpHeader{
+        .version = pfcp.types.PFCP_VERSION,
+        .mp = false,
+        .s = false,
+        .message_type = @intFromEnum(pfcp.types.MessageType.association_release_request),
+        .message_length = 0, // Will calculate later
+        .seid = null,
+        .sequence_number = @intCast(state.nextSequenceNumber()),
+        .spare3 = 0,
+    };
+
+    try pfcp.marshal.encodePfcpHeader(&writer, header);
+
+    // Add Node ID IE
+    const node_id = pfcp.ie.NodeId.initIpv4([_]u8{ 127, 0, 0, 1 });
+    try pfcp.marshal.encodeNodeId(&writer, node_id);
+
+    // Update message length
+    const msg_len: u16 = @intCast(writer.pos - 4); // Exclude first 4 bytes (version, type, length)
+    std.mem.writeInt(u16, msg_buffer[2..4], msg_len, .big);
+
+    const msg = writer.getWritten();
     _ = try std.posix.sendto(
         state.pfcp_socket,
         msg,
@@ -477,7 +675,7 @@ fn sendAssociationReleaseRequest(state: *TestState) !void {
     if (bytes >= 8) {
         const msg_type = response_buf[1];
         print("Received response: message type = {}\n", .{msg_type});
-        if (msg_type == @intFromEnum(PfcpMessageType.association_release_response)) {
+        if (msg_type == @intFromEnum(pfcp.types.MessageType.association_release_response)) {
             print("✓ Association released successfully\n", .{});
         } else {
             print("✗ Unexpected response type\n", .{});
@@ -496,7 +694,7 @@ pub fn main() !void {
     print("║       PicoUP QER Integration Test Suite                   ║\n", .{});
     print("╚════════════════════════════════════════════════════════════╝\n", .{});
     print("\n", .{});
-    print("Target UPF: {}:{} (PFCP), {}:{} (GTP-U)\n", .{ UPF_ADDR, PFCP_PORT, UPF_ADDR, GTPU_PORT });
+    print("Target UPF: {s}:{} (PFCP), {s}:{} (GTP-U)\n", .{ UPF_ADDR, PFCP_PORT, UPF_ADDR, GTPU_PORT });
     print("\n", .{});
     print("Test Plan:\n", .{});
     print("  1. Create PFCP association\n", .{});

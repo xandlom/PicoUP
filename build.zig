@@ -65,6 +65,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Add dependencies
+    qer_test.root_module.addImport("zig-pfcp", pfcp_module);
+
     b.installArtifact(qer_test);
 
     // Create run step for integration test
@@ -73,4 +76,24 @@ pub fn build(b: *std.Build) void {
 
     const qer_test_step = b.step("test-qer", "Run QER integration test");
     qer_test_step.dependOn(&run_qer_test.step);
+
+    // Build URR integration test executable
+    const urr_test = b.addExecutable(.{
+        .name = "test_urr_integration",
+        .root_source_file = b.path("test_urr_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Add dependencies
+    urr_test.root_module.addImport("zig-pfcp", pfcp_module);
+
+    b.installArtifact(urr_test);
+
+    // Create run step for integration test
+    const run_urr_test = b.addRunArtifact(urr_test);
+    run_urr_test.step.dependOn(b.getInstallStep());
+
+    const urr_test_step = b.step("test-urr", "Run URR integration test");
+    urr_test_step.dependOn(&run_urr_test.step);
 }

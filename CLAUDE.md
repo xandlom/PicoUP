@@ -2,7 +2,7 @@
 
 This document provides comprehensive guidance for AI assistants working on the PicoUP codebase. It covers the project structure, development workflows, coding conventions, and 5G networking context.
 
-**Last Updated**: 2025-11-14
+**Last Updated**: 2025-11-16
 **Project Version**: 0.1.0
 **Zig Version**: 0.14.1
 
@@ -47,12 +47,12 @@ This is a simplified implementation for educational purposes. See [Gotchas & Lim
 ## Codebase Structure
 
 ```
-/home/user/PicoUP/
+PicoUP/
 ├── src/
 │   ├── upf.zig                 # Main entry point and thread orchestration (180 lines)
-│   ├── types.zig              # Core types: PDR, FAR, constants (63 lines)
-│   ├── session.zig            # Session and SessionManager (265 lines)
-│   ├── stats.zig              # Statistics collection and reporting (83 lines)
+│   ├── types.zig              # Core types: PDR, FAR, QER, URR, constants (330 lines)
+│   ├── session.zig            # Session and SessionManager (380 lines)
+│   ├── stats.zig              # Statistics collection and reporting (130 lines)
 │   ├── pfcp/                  # PFCP control plane modules
 │   │   ├── handler.zig        # Main PFCP message router (61 lines)
 │   │   ├── heartbeat.zig      # Heartbeat handling (53 lines)
@@ -64,9 +64,11 @@ This is a simplified implementation for educational purposes. See [Gotchas & Lim
 ├── deps/                       # Git submodules for external dependencies
 │   ├── zig-pfcp/              # PFCP protocol library (github.com/xandlom/zig-pfcp)
 │   └── zig-gtp-u/             # GTP-U protocol library (github.com/xandlom/zig-gtp-u)
-├── build.zig                   # Build configuration (59 lines)
+├── build.zig                   # Build configuration (93 lines)
 ├── build.zig.zon              # Package metadata and dependencies
 ├── echo_udp_srv.zig           # Reference UDP server implementation (338 lines)
+├── test_qer_integration.zig   # QER integration test (600 lines)
+├── test_urr_integration.zig   # URR integration test (620 lines)
 ├── README.md                   # User-facing documentation
 ├── CLAUDE.md                   # AI assistant guide (this file)
 ├── LICENSE                     # Apache 2.0 License
@@ -77,7 +79,9 @@ Build Artifacts (gitignored):
 ├── .zig-cache/                # Zig build cache
 └── zig-out/                   # Build output directory
     └── bin/
-        └── picoupf            # Main executable
+        ├── picoupf                    # Main executable
+        ├── test_qer_integration       # QER integration test executable
+        └── test_urr_integration       # URR integration test executable
 ```
 
 ### File Responsibilities
@@ -86,9 +90,9 @@ Build Artifacts (gitignored):
 |------|-------|---------|
 | **Core Modules** | | |
 | `src/upf.zig` | 180 | Main entry point, thread orchestration, global state |
-| `src/types.zig` | 63 | Core types (PDR, FAR) and configuration constants |
-| `src/session.zig` | 265 | Session and SessionManager with thread-safe operations |
-| `src/stats.zig` | 83 | Statistics collection, atomic counters, reporting thread |
+| `src/types.zig` | 330 | Core types (PDR, FAR, QER, URR) and configuration constants |
+| `src/session.zig` | 380 | Session and SessionManager with thread-safe operations |
+| `src/stats.zig` | 130 | Statistics collection, atomic counters, reporting thread |
 | **PFCP Modules** | | |
 | `src/pfcp/handler.zig` | 61 | Main PFCP message router (dispatches by message type) |
 | `src/pfcp/heartbeat.zig` | 53 | Heartbeat Request/Response handling |
@@ -97,9 +101,11 @@ Build Artifacts (gitignored):
 | **GTP-U Modules** | | |
 | `src/gtpu/handler.zig` | 60 | GTP-U header parsing and creation functions |
 | `src/gtpu/worker.zig` | 205 | Worker threads, packet queue, packet processing logic |
-| **Build & Reference** | | |
-| `build.zig` | 59 | Build configuration, module setup, test configuration |
+| **Build & Tests** | | |
+| `build.zig` | 93 | Build configuration, module setup, test configuration |
 | `echo_udp_srv.zig` | 338 | Reference implementation demonstrating UDP server pattern |
+| `test_qer_integration.zig` | 600 | QER integration test with PFCP and GTP-U flows |
+| `test_urr_integration.zig` | 620 | URR integration test with usage tracking and quotas |
 
 ### Module Organization
 
@@ -602,14 +608,49 @@ zig build
 ### Test Commands
 
 ```bash
-# Run tests
+# Run unit tests
 zig build test
 
-# Note: Currently no dedicated test files exist
-# Tests can be added inline in src/upf.zig using:
+# Run QER integration test
+zig build test-qer
+
+# Run URR integration test
+zig build test-urr
+
+# Note: Unit tests can be added inline in src/upf.zig using:
 test "description" {
     // test code
 }
+```
+
+### Integration Tests
+
+The project includes two comprehensive integration tests that verify end-to-end functionality:
+
+**QER Integration Test** (`test_qer_integration.zig`):
+- Tests PFCP association setup
+- Creates PFCP session with QER (QoS Enforcement Rules)
+- Sends uplink/downlink GTP-U packets
+- Verifies MBR (Maximum Bit Rate) and PPS (Packets Per Second) rate limiting
+- Tests token bucket algorithm
+
+**URR Integration Test** (`test_urr_integration.zig`):
+- Tests PFCP association setup
+- Creates PFCP session with URR (Usage Reporting Rules)
+- Sends GTP-U packets to trigger volume tracking
+- Verifies volume quota enforcement (hard limit)
+- Verifies volume threshold triggers (soft limit)
+- Tests time-based quota and threshold enforcement
+
+Both tests require the UPF to be running on localhost:
+```bash
+# Terminal 1: Start the UPF
+./zig-out/bin/picoupf
+
+# Terminal 2: Run integration test
+zig build test-qer
+# or
+zig build test-urr
 ```
 
 ### Running the UPF
@@ -648,7 +689,7 @@ netstat -uln | grep -E '8805|2152'
 
 ### Build Configuration
 
-The `build.zig` file defines three main targets:
+The `build.zig` file defines the following build targets:
 
 1. **Executable** (`picoupf`):
    - Entry point: `src/upf.zig`
@@ -660,8 +701,18 @@ The `build.zig` file defines three main targets:
    - Forwards command-line arguments if provided
 
 3. **Test Step** (`zig build test`):
-   - Compiles tests from `src/upf.zig`
+   - Compiles and runs unit tests from `src/upf.zig`
    - Includes same imports as main executable
+
+4. **QER Integration Test** (`zig build test-qer`):
+   - Entry point: `test_qer_integration.zig`
+   - Output: `zig-out/bin/test_qer_integration`
+   - Tests QoS enforcement with MBR/PPS rate limiting
+
+5. **URR Integration Test** (`zig build test-urr`):
+   - Entry point: `test_urr_integration.zig`
+   - Output: `zig-out/bin/test_urr_integration`
+   - Tests usage tracking with volume/time quotas
 
 ### Debugging Build Issues
 
@@ -1361,10 +1412,14 @@ Total: ~10MB working set
 
 ### Testing Considerations
 
-1. **No unit tests exist**: Would need to add test blocks
-2. **Integration testing required**: Need real PFCP and GTP-U clients
-3. **Use echo_udp_srv.zig as reference**: Shows client/server testing pattern
+1. **Unit tests**: Can be added inline in source files using `test` blocks
+2. **Integration tests available**:
+   - `test_qer_integration.zig` - Tests QoS enforcement end-to-end
+   - `test_urr_integration.zig` - Tests usage tracking end-to-end
+   - Both tests require UPF to be running on localhost
+3. **Use echo_udp_srv.zig as reference**: Shows UDP client/server testing pattern
 4. **Statistics are key**: Use atomic counters to verify behavior
+5. **Integration test pattern**: Tests send PFCP messages, create sessions, send GTP-U packets, verify behavior
 
 ### Performance Notes
 
@@ -1392,16 +1447,18 @@ Total: ~10MB working set
 
 | What | Where |
 |------|-------|
-| Main entry point | `/home/user/PicoUP/src/upf.zig` |
-| Core types | `/home/user/PicoUP/src/types.zig` |
-| Session management | `/home/user/PicoUP/src/session.zig` |
-| Statistics | `/home/user/PicoUP/src/stats.zig` |
-| PFCP modules | `/home/user/PicoUP/src/pfcp/` |
-| GTP-U modules | `/home/user/PicoUP/src/gtpu/` |
-| Build config | `/home/user/PicoUP/build.zig` |
-| Dependencies | `/home/user/PicoUP/deps/` |
-| Executable | `/home/user/PicoUP/zig-out/bin/picoupf` |
-| Documentation | `/home/user/PicoUP/README.md`, `CLAUDE.md` |
+| Main entry point | `src/upf.zig` |
+| Core types | `src/types.zig` |
+| Session management | `src/session.zig` |
+| Statistics | `src/stats.zig` |
+| PFCP modules | `src/pfcp/` |
+| GTP-U modules | `src/gtpu/` |
+| Build config | `build.zig` |
+| Dependencies | `deps/` |
+| Executable | `zig-out/bin/picoupf` |
+| QER integration test | `test_qer_integration.zig` |
+| URR integration test | `test_urr_integration.zig` |
+| Documentation | `README.md`, `CLAUDE.md` |
 
 ### Port Numbers
 
@@ -1435,7 +1492,9 @@ zig build -Doptimize=ReleaseFast   # Release build
 zig build run                       # Build and run
 
 # Test
-zig build test                      # Run tests
+zig build test                      # Run unit tests
+zig build test-qer                  # Run QER integration test
+zig build test-urr                  # Run URR integration test
 
 # Clean
 rm -rf .zig-cache zig-out          # Remove build artifacts
@@ -1491,6 +1550,7 @@ For issues or questions:
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2025-11-16 | 1.1 | Add QER/URR integration tests, update file structure and line counts, add integration test documentation |
 | 2025-11-14 | 1.0 | Initial CLAUDE.md creation with comprehensive documentation |
 
 ---
