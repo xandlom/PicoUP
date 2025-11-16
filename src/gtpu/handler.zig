@@ -4,14 +4,17 @@
 const std = @import("std");
 const gtpu = @import("zig-gtp-u");
 
-// Parse GTP-U header using the zig-gtp-u library
-// Returns header information and payload offset
-pub fn parseGtpuHeader(data: []const u8) !struct {
+// Parsed GTP-U header information
+pub const GtpuHeader = struct {
     version: u8,
     message_type: u8,
     teid: u32,
     payload_offset: usize,
-} {
+};
+
+// Parse GTP-U header using the zig-gtp-u library
+// Returns header information and payload offset
+pub fn parseGtpuHeader(data: []const u8) !GtpuHeader {
     if (data.len < gtpu.GtpuHeader.MANDATORY_SIZE) {
         return error.PacketTooShort;
     }
@@ -25,7 +28,7 @@ pub fn parseGtpuHeader(data: []const u8) !struct {
     // Calculate payload offset based on header size
     const offset = header.size();
 
-    return .{
+    return GtpuHeader{
         .version = header.flags.version,
         .message_type = @intFromEnum(header.message_type),
         .teid = header.teid,
