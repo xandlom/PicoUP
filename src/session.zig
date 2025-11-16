@@ -77,9 +77,13 @@ pub const Session = struct {
         // This handles cases where multiple PDRs have the same TEID
         for (0..self.pdr_count) |i| {
             if (self.pdrs[i].allocated and
-                self.pdrs[i].teid == teid and
-                self.pdrs[i].source_interface == source_interface)
+                self.pdrs[i].pdi.source_interface == source_interface)
             {
+                // Check F-TEID if present in PDI
+                if (self.pdrs[i].pdi.has_fteid and self.pdrs[i].pdi.teid != teid) {
+                    continue;
+                }
+
                 // First match or higher precedence
                 if (best_pdr == null or self.pdrs[i].precedence > highest_precedence) {
                     best_pdr = &self.pdrs[i];

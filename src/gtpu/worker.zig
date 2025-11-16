@@ -76,6 +76,27 @@ pub const PacketQueue = struct {
     }
 };
 
+// Packet flow information extracted from IP header
+const PacketFlowInfo = struct {
+    has_ip_info: bool,
+    src_ip: [4]u8,
+    dst_ip: [4]u8,
+    protocol: u8, // 6=TCP, 17=UDP, etc.
+    src_port: u16,
+    dst_port: u16,
+
+    fn init() PacketFlowInfo {
+        return PacketFlowInfo{
+            .has_ip_info = false,
+            .src_ip = .{ 0, 0, 0, 0 },
+            .dst_ip = .{ 0, 0, 0, 0 },
+            .protocol = 0,
+            .src_port = 0,
+            .dst_port = 0,
+        };
+    }
+};
+
 // Packet processing context - carries state through pipeline stages
 const PacketContext = struct {
     packet: GtpuPacket,
@@ -86,9 +107,56 @@ const PacketContext = struct {
     payload: []const u8,
     source_interface: u8, // Determined from packet context
     thread_id: u32,
+    flow_info: PacketFlowInfo, // Parsed IP packet flow information
 };
 
-// Pipeline Stage 1: Parse GTP-U header
+// Parse IP packet to extract flow information
+fn parseIpPacket(payload: []const u8) PacketFlowInfo {
+    var flow_info = PacketFlowInfo.init();
+
+    // Minimum IPv4 header is 20 bytes
+    if (payload.len < 20) {
+        return flow_info;
+    }
+
+    // Check IP version (first 4 bits should be 4 for IPv4)
+    const version = payload[0] >> 4;
+    if (version != 4) {
+        return flow_info; // Only support IPv4 for now
+    }
+
+    // Extract IP header fields
+    const ihl = payload[0] & 0x0F; // Internet Header Length (in 32-bit words)
+    const header_len = ihl * 4;
+
+    if (payload.len < header_len or header_len < 20) {
+        return flow_info;
+    }
+
+    flow_info.has_ip_info = true;
+    flow_info.protocol = payload[9];
+
+    // Source IP (bytes 12-15)
+    flow_info.src_ip = [4]u8{ payload[12], payload[13], payload[14], payload[15] };
+
+    // Destination IP (bytes 16-19)
+    flow_info.dst_ip = [4]u8{ payload[16], payload[17], payload[18], payload[19] };
+
+    // Extract port numbers for TCP/UDP
+    const transport_offset = header_len;
+    if (payload.len >= transport_offset + 4) {
+        if (flow_info.protocol == 6 or flow_info.protocol == 17) { // TCP or UDP
+            // Source port (bytes 0-1 of transport header)
+            flow_info.src_port = std.mem.readInt(u16, payload[transport_offset..][0..2], .big);
+            // Destination port (bytes 2-3 of transport header)
+            flow_info.dst_port = std.mem.readInt(u16, payload[transport_offset + 2..][0..2], .big);
+        }
+    }
+
+    return flow_info;
+}
+
+// Pipeline Stage 1: Parse GTP-U header and extract flow information
 fn parseHeader(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
     ctx.header = handler.parseGtpuHeader(ctx.packet.data[0..ctx.packet.length]) catch |err| {
         print("Worker {}: Failed to parse GTP-U header: {}\n", .{ ctx.thread_id, err });
@@ -104,6 +172,9 @@ fn parseHeader(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
 
     // Extract payload
     ctx.payload = ctx.packet.data[ctx.header.payload_offset..ctx.packet.length];
+
+    // Parse IP packet for flow information
+    ctx.flow_info = parseIpPacket(ctx.payload);
 
     // Determine source interface (simplified: assume N3/Access for now)
     // In a real implementation, this would be determined by which socket received the packet
@@ -123,8 +194,62 @@ fn lookupSession(ctx: *PacketContext, session_manager: *session_mod.SessionManag
     return true;
 }
 
-// Pipeline Stage 3: Match PDR with precedence handling
-// Finds the best matching PDR based on TEID and source_interface, considering precedence
+// Check if packet matches PDI criteria
+fn matchesPDI(pdi: *const types.PDI, ctx: *const PacketContext) bool {
+    // Source interface must match (mandatory)
+    if (pdi.source_interface != ctx.source_interface) {
+        return false;
+    }
+
+    // Check F-TEID if present in PDI
+    if (pdi.has_fteid) {
+        if (pdi.teid != ctx.header.teid) {
+            return false;
+        }
+    }
+
+    // Check UE IP address if present in PDI and we have IP info
+    if (pdi.has_ue_ip and ctx.flow_info.has_ip_info) {
+        // For uplink (N3), UE IP is the source; for downlink (N6), UE IP is the destination
+        const ue_ip_matches = if (ctx.source_interface == 0) // N3 (Access)
+            std.mem.eql(u8, &pdi.ue_ip, &ctx.flow_info.src_ip)
+        else if (ctx.source_interface == 1) // N6 (Core)
+            std.mem.eql(u8, &pdi.ue_ip, &ctx.flow_info.dst_ip)
+        else
+            false; // N9 - skip UE IP matching
+
+        if (!ue_ip_matches) {
+            return false;
+        }
+    }
+
+    // Check SDF filter if present in PDI and we have IP info
+    if (pdi.has_sdf_filter and ctx.flow_info.has_ip_info) {
+        // Check protocol (0 means any protocol)
+        if (pdi.sdf_protocol != 0 and pdi.sdf_protocol != ctx.flow_info.protocol) {
+            return false;
+        }
+
+        // Check destination port range (for TCP/UDP)
+        if (ctx.flow_info.protocol == 6 or ctx.flow_info.protocol == 17) { // TCP or UDP
+            if (pdi.sdf_dest_port_low > 0 or pdi.sdf_dest_port_high > 0) {
+                if (ctx.flow_info.dst_port < pdi.sdf_dest_port_low or
+                    ctx.flow_info.dst_port > pdi.sdf_dest_port_high)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // TODO: Check Application ID if present
+    // This would require application identification logic (DPI)
+
+    return true;
+}
+
+// Pipeline Stage 3: Match PDR with comprehensive PDI matching and precedence handling
+// Finds the best matching PDR based on PDI criteria, considering precedence
 fn matchPDR(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
     if (ctx.session) |session| {
         session.mutex.lock();
@@ -135,11 +260,13 @@ fn matchPDR(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
 
         // Find all matching PDRs and select the one with highest precedence
         for (0..session.pdr_count) |i| {
-            const pdr = &session.pdrs[i];
-            if (pdr.allocated and
-                pdr.teid == ctx.header.teid and
-                pdr.source_interface == ctx.source_interface)
-            {
+            var pdr = &session.pdrs[i];
+            if (!pdr.allocated) {
+                continue;
+            }
+
+            // Check if packet matches this PDR's PDI
+            if (matchesPDI(&pdr.pdi, ctx)) {
                 // First match or higher precedence
                 if (best_pdr == null or pdr.precedence > highest_precedence) {
                     best_pdr = pdr;
@@ -150,7 +277,24 @@ fn matchPDR(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
 
         ctx.pdr = best_pdr;
         if (ctx.pdr == null) {
-            print("Worker {}: No matching PDR for TEID 0x{x}, source_interface: {}\n", .{ ctx.thread_id, ctx.header.teid, ctx.source_interface });
+            if (ctx.flow_info.has_ip_info) {
+                print("Worker {}: No matching PDR for TEID 0x{x}, src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {}, port: {}\n", .{
+                    ctx.thread_id,
+                    ctx.header.teid,
+                    ctx.flow_info.src_ip[0],
+                    ctx.flow_info.src_ip[1],
+                    ctx.flow_info.src_ip[2],
+                    ctx.flow_info.src_ip[3],
+                    ctx.flow_info.dst_ip[0],
+                    ctx.flow_info.dst_ip[1],
+                    ctx.flow_info.dst_ip[2],
+                    ctx.flow_info.dst_ip[3],
+                    ctx.flow_info.protocol,
+                    ctx.flow_info.dst_port,
+                });
+            } else {
+                print("Worker {}: No matching PDR for TEID 0x{x}, source_interface: {}\n", .{ ctx.thread_id, ctx.header.teid, ctx.source_interface });
+            }
             _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
             return false;
         }
@@ -313,6 +457,7 @@ pub fn gtpuWorkerThread(
                 .payload = undefined,
                 .source_interface = 0,
                 .thread_id = thread_id,
+                .flow_info = PacketFlowInfo.init(),
             };
 
             // Execute pipeline stages
