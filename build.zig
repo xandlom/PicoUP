@@ -56,4 +56,21 @@ pub fn build(b: *std.Build) void {
     const run_upf_tests = b.addRunArtifact(upf_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_upf_tests.step);
+
+    // Build QER integration test executable
+    const qer_test = b.addExecutable(.{
+        .name = "test_qer_integration",
+        .root_source_file = b.path("test_qer_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    b.installArtifact(qer_test);
+
+    // Create run step for integration test
+    const run_qer_test = b.addRunArtifact(qer_test);
+    run_qer_test.step.dependOn(b.getInstallStep());
+
+    const qer_test_step = b.step("test-qer", "Run QER integration test");
+    qer_test_step.dependOn(&run_qer_test.step);
 }
