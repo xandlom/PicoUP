@@ -354,7 +354,7 @@ fn enforceQoS(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
 
     const qer = ctx.qer.?;
     const payload_bits = ctx.payload.len * 8;
-    const now = time.nanoTimestamp();
+    const now = @as(i64, @intCast(time.nanoTimestamp()));
 
     qer.mutex.lock();
     defer qer.mutex.unlock();
