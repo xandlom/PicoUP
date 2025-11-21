@@ -13,6 +13,7 @@ const session_mod = @import("session.zig");
 const stats_mod = @import("stats.zig");
 const pfcp_handler = @import("pfcp/handler.zig");
 const gtpu_worker = @import("gtpu/worker.zig");
+const gtpu_handler = @import("gtpu/handler.zig");
 
 // Re-export constants from types module
 const WORKER_THREADS = types.WORKER_THREADS;
@@ -76,7 +77,7 @@ fn pfcpThread(allocator: std.mem.Allocator) !void {
 }
 
 // GTP-U thread - receives data plane packets and enqueues them
-fn gtpuThread() !void {
+fn gtpuThread(allocator: std.mem.Allocator) !void {
     print("GTP-U thread started\n", .{});
 
     const gtpu_addr = try net.Address.resolveIp("0.0.0.0", GTPU_PORT);
@@ -108,6 +109,20 @@ fn gtpuThread() !void {
 
         if (bytes_received > 0) {
             _ = global_stats.gtpu_packets_rx.fetchAdd(1, .seq_cst);
+
+            // Handle Echo Request/Response messages (path management)
+            // These don't need session lookup, handle them directly
+            if (gtpu_handler.handleEchoRequest(allocator, gtpu_socket, buffer[0..bytes_received], client_address)) {
+                _ = global_stats.gtpu_echo_requests.fetchAdd(1, .seq_cst);
+                continue; // Echo request handled, don't enqueue
+            }
+
+            // Check for Echo Response (for RTT monitoring, future enhancement)
+            if (gtpu_handler.isEchoResponse(buffer[0..bytes_received])) {
+                _ = global_stats.gtpu_echo_responses.fetchAdd(1, .seq_cst);
+                print("GTP-U: Received Echo Response from {}\n", .{client_address});
+                continue; // Echo response received, don't enqueue
+            }
 
             var packet = gtpu_worker.GtpuPacket{
                 .data = undefined,
@@ -160,7 +175,7 @@ pub fn main() !void {
     const pfcp_thread_handle = try Thread.spawn(.{}, pfcpThread, .{allocator});
 
     // Start GTP-U thread
-    const gtpu_thread_handle = try Thread.spawn(.{}, gtpuThread, .{});
+    const gtpu_thread_handle = try Thread.spawn(.{}, gtpuThread, .{allocator});
 
     // Start statistics thread
     const stats_thread_handle = try Thread.spawn(.{}, stats_mod.statsThread, .{

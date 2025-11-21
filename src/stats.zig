@@ -31,6 +31,10 @@ pub const Stats = struct {
     urr_reports_triggered: Atomic(u64), // Number of reports triggered
     urr_quota_exceeded: Atomic(u64), // Packets dropped due to quota
 
+    // Echo Request/Response statistics (path management)
+    gtpu_echo_requests: Atomic(u64), // Echo requests received and responded to
+    gtpu_echo_responses: Atomic(u64), // Echo responses received
+
     start_time: i64,
 
     pub fn init() Stats {
@@ -50,6 +54,8 @@ pub const Stats = struct {
             .urr_packets_tracked = Atomic(u64).init(0),
             .urr_reports_triggered = Atomic(u64).init(0),
             .urr_quota_exceeded = Atomic(u64).init(0),
+            .gtpu_echo_requests = Atomic(u64).init(0),
+            .gtpu_echo_responses = Atomic(u64).init(0),
             .start_time = time.timestamp(),
         };
     }
@@ -81,6 +87,8 @@ pub fn statsThread(stats: *Stats, session_mgr: *session.SessionManager, should_s
         const urr_tracked = stats.urr_packets_tracked.load(.seq_cst);
         const urr_reports = stats.urr_reports_triggered.load(.seq_cst);
         const urr_quota = stats.urr_quota_exceeded.load(.seq_cst);
+        const echo_req = stats.gtpu_echo_requests.load(.seq_cst);
+        const echo_resp = stats.gtpu_echo_responses.load(.seq_cst);
 
         const rx_rate = (gtpu_rx - last_rx) / 5;
         const tx_rate = (gtpu_tx - last_tx) / 5;
@@ -93,6 +101,7 @@ pub fn statsThread(stats: *Stats, session_mgr: *session.SessionManager, should_s
         print("PFCP Messages: {}, Active Sessions: {}/{}\n", .{ pfcp_msgs, active_sessions, pfcp_sess });
         print("GTP-U RX: {}, TX: {}, Dropped: {}\n", .{ gtpu_rx, gtpu_tx, gtpu_drop });
         print("GTP-U Rate: {} pkt/s RX, {} pkt/s TX\n", .{ rx_rate, tx_rate });
+        print("GTP-U Echo: Req={}, Resp={}\n", .{ echo_req, echo_resp });
         print("Interface TX: N3={}, N6={}, N9={}\n", .{ n3_tx, n6_tx, n9_tx });
         print("QoS: Passed={}, MBR Dropped={}, PPS Dropped={}\n", .{ qos_passed, qos_mbr_drop, qos_pps_drop });
         print("URR: Tracked={}, Reports={}, Quota Exceeded={}\n", .{ urr_tracked, urr_reports, urr_quota });
