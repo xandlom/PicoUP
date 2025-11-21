@@ -1306,11 +1306,11 @@ This is a simplified UPF implementation for educational and testing purposes:
    - ❌ No redundancy/failover
    - ❌ No QoS between UPFs
 
-5. **Partial QoS Support**: QER implemented with rate limiting
+5. **QoS Support**: QER implemented with rate limiting and QFI extraction
    - ✅ QER (QoS Enforcement Rules) with MBR and PPS limits
    - ✅ Token bucket rate limiting
    - ✅ Traffic shaping via rate limits
-   - ❌ No QFI parsing from GTP-U extension headers
+   - ✅ QFI parsing from GTP-U extension headers (PDU Session Container)
    - ❌ No GBR (Guaranteed Bit Rate) enforcement
 
 6. **Partial Usage Reporting**: URR implemented with volume/time tracking
@@ -1338,9 +1338,10 @@ This is a simplified UPF implementation for educational and testing purposes:
    - Higher values cause stack overflow
    - Consider heap allocation for production
 
-2. **No Extension Header Support**: GTP-U extension headers cause error
-   - QFI is in extension headers
-   - Echo requests with sequence numbers fail
+2. **Extension Header Support**: PDU Session Container parsing implemented
+   - ✅ QFI extraction from extension headers
+   - ✅ Echo requests with sequence numbers work correctly
+   - ❌ Other extension header types not yet used (available in library)
 
 3. **No IPv6 Support**: All addresses are IPv4
    - Hardcoded to `std.posix.AF.INET`

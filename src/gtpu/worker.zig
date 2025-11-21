@@ -110,6 +110,9 @@ const PacketContext = struct {
     source_interface: u8, // Determined from packet context
     thread_id: u32,
     flow_info: PacketFlowInfo, // Parsed IP packet flow information
+    // QoS Flow Identifier extracted from PDU Session Container extension header
+    qfi: ?u6, // QFI (0-63) from GTP-U extension headers
+    pdu_type: ?u4, // PDU Type (0=DL, 1=UL) from extension headers
 };
 
 // Parse IP packet to extract flow information
@@ -177,6 +180,15 @@ fn parseHeader(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
 
     // Parse IP packet for flow information
     ctx.flow_info = parseIpPacket(ctx.payload);
+
+    // Extract QFI from extension headers (if present)
+    ctx.qfi = ctx.header.qfi;
+    ctx.pdu_type = ctx.header.pdu_type;
+
+    // Log QFI if present (important for 5G QoS)
+    if (ctx.qfi) |qfi| {
+        print("Worker {}: QFI={} extracted from extension headers\n", .{ ctx.thread_id, qfi });
+    }
 
     // Determine source interface (simplified: assume N3/Access for now)
     // In a real implementation, this would be determined by which socket received the packet
@@ -680,6 +692,8 @@ pub fn gtpuWorkerThread(
                 .source_interface = 0,
                 .thread_id = thread_id,
                 .flow_info = PacketFlowInfo.init(),
+                .qfi = null,
+                .pdu_type = null,
             };
 
             // Execute pipeline stages

@@ -2,66 +2,79 @@
 
 This document analyzes the zig-gtp-u library capabilities and identifies gaps/underutilization in PicoUP.
 
+**Last Updated**: 2025-11-21 - Major library integration completed
+
 ## Current Usage in PicoUP
 
-PicoUP uses zig-gtp-u minimally in 1 file with ~8 API references:
+PicoUP now leverages significant zig-gtp-u functionality across multiple files:
 
 | File | Usage |
 |------|-------|
-| `src/gtpu/handler.zig` | Header encode/decode only |
+| `src/gtpu/handler.zig` | Header encode/decode, extension headers, QFI extraction, echo handling |
+| `src/gtpu/worker.zig` | QFI in packet context, extension header info |
+| `src/upf.zig` | Echo request/response handling in GTP-U thread |
 
 ### What's Currently Used
 
 ```zig
 const gtpu = @import("zig-gtp-u");
 
-// Only these features are used:
+// Core header operations
 gtpu.GtpuHeader.MANDATORY_SIZE  // Constant (8 bytes)
-gtpu.GtpuHeader.decode()        // Parse incoming header
+gtpu.GtpuHeader.decode()        // Parse incoming header with extension support
 gtpu.GtpuHeader.encode()        // Create outgoing header
 gtpu.GtpuHeader.init()          // Initialize header struct
-header.teid                      // Access TEID field
-header.size()                    // Get header size
+
+// Extension header support (NEW)
+gtpu.extension.ExtensionHeader.decode()  // Parse extension headers
+gtpu.extension.PduSessionContainer       // QFI extraction for 5G QoS
+
+// Message-level operations (NEW)
+gtpu.GtpuMessage.decode()           // Full message decode with IEs
+gtpu.GtpuMessage.createGpdu()       // Create G-PDU message
+gtpu.GtpuMessage.createEchoRequest()   // Path management
+gtpu.GtpuMessage.createEchoResponse()  // Path management
+gtpu.GtpuMessage.getQFI()           // Extract QFI from message
 ```
 
 ## Library Capabilities vs PicoUP Usage
 
-The zig-gtp-u library is **feature-rich but underutilized** by PicoUP:
+The zig-gtp-u library integration has been significantly improved:
 
 | Feature | zig-gtp-u Support | PicoUP Usage |
 |---------|-------------------|--------------|
-| G-PDU (0xFF) messages | Full | Basic |
-| Echo Request/Response | Full | Not used |
-| End Marker | Full | Not used |
-| Error Indication | Full | Not used |
-| Extension headers (11 types) | Full | Not used |
-| PDU Session Container (QFI) | Full | Not used |
-| Path management | Full | Not used |
+| G-PDU (0xFF) messages | Full | **Full** |
+| Echo Request/Response | Full | **Full** |
+| End Marker | Full | Available (not used) |
+| Error Indication | Full | Available (not used) |
+| Extension headers (11 types) | Full | **PDU Session Container** |
+| PDU Session Container (QFI) | Full | **Full** |
+| Path management | Full | **Basic (Echo)** |
 | Tunnel state machine | Full | Not used |
 | Session management | Full | Not used |
-| QoS flow management | Full | Not used |
-| Anti-replay protection | Full | Not used |
+| QoS flow management | Full | **QFI extraction** |
+| Anti-replay protection | Full | Available |
 | Memory pooling | Full | Not used |
 | PCAP capture | Full | Not used |
-| TEID generation | Full | Not used |
+| TEID generation | Full | Available |
 
-## Critical Underutilized Features
+## Implemented Features (Previously Underutilized)
 
-### 1. Extension Headers (Critical for 5G)
+### 1. Extension Headers - IMPLEMENTED
 
-The library supports 11 extension header types:
+The library supports 11 extension header types. PicoUP now parses the most critical one:
 
-| Type | Code | Purpose | 5G Relevance |
-|------|------|---------|--------------|
-| PDU Session Container | 0x85 | Contains QFI | Critical |
-| PDCP PDU Number | 0xC0 | Sequencing | Important |
-| Long PDCP PDU Number | 0x82 | Extended sequencing | Important |
-| Service Class Indicator | 0x20 | Classification | Useful |
-| UDP Port | 0x40 | Port info | Useful |
-| RAN Container | 0x81 | RAN data | Useful |
-| NR RAN Container | 0x84 | NR specific | Useful |
+| Type | Code | Purpose | PicoUP Status |
+|------|------|---------|---------------|
+| PDU Session Container | 0x85 | Contains QFI | **IMPLEMENTED** |
+| PDCP PDU Number | 0xC0 | Sequencing | Available |
+| Long PDCP PDU Number | 0x82 | Extended sequencing | Available |
+| Service Class Indicator | 0x20 | Classification | Available |
+| UDP Port | 0x40 | Port info | Available |
+| RAN Container | 0x81 | RAN data | Available |
+| NR RAN Container | 0x84 | NR specific | Available |
 
-#### PDU Session Container (0x85)
+#### PDU Session Container (0x85) - IMPLEMENTED
 
 This is **essential for 5G QoS** and contains:
 - PDU Type (4 bits): 0=downlink, 1=uplink
@@ -69,28 +82,36 @@ This is **essential for 5G QoS** and contains:
 - Paging Policy Indicator (3 bits)
 - Reflective QoS Indicator (1 bit)
 
-**Current PicoUP limitation** (from CLAUDE.md):
-> "No QFI parsing from GTP-U extension headers"
-
-**Solution**: Use the existing library feature:
+**Implementation** in `src/gtpu/handler.zig`:
 ```zig
-const gtpu = @import("zig-gtp-u");
+// QFI is now extracted automatically during header parsing
+const header = try handler.parseGtpuHeader(data);
+if (header.qfi) |qfi| {
+    // QFI available for QoS enforcement (0-63)
+}
+if (header.pdu_type) |pdu_type| {
+    // 0=DL, 1=UL
+}
+// header.rqi contains Reflective QoS Indicator
+```
 
-// Parse extension headers
-const header = try gtpu.GtpuHeader.decode(reader);
-if (header.next_extension_type) |ext_type| {
-    if (ext_type == .pdu_session_container) {
-        const ext = try gtpu.extension.PduSessionContainer.decode(reader);
-        const qfi = ext.qfi;  // QoS Flow Identifier (0-63)
-        // Use QFI for QoS enforcement
-    }
+### 2. Echo Request/Response (Path Management) - IMPLEMENTED
+
+PicoUP now handles Echo Request/Response messages for path management:
+
+```zig
+// In src/upf.zig gtpuThread:
+// Echo requests are handled directly, responses sent automatically
+if (gtpu_handler.handleEchoRequest(allocator, socket, data, sender)) {
+    // Echo request handled, response sent
 }
 ```
 
-### 2. Echo Request/Response (Path Management)
+**Statistics tracked**:
+- `gtpu_echo_requests`: Echo requests received and responded to
+- `gtpu_echo_responses`: Echo responses received
 
-The library provides full path management:
-
+**Additional library capabilities available**:
 ```zig
 const gtpu = @import("zig-gtp-u");
 
@@ -104,8 +125,8 @@ const path_manager = gtpu.path.PathManager.init();
 // - RTT monitoring (min/max/avg)
 ```
 
-**Current PicoUP limitation** (from CLAUDE.md):
-> "Echo requests with sequence numbers fail"
+**Previous limitation** (now fixed):
+> "Echo requests with sequence numbers fail" - **RESOLVED**: Echo handling now properly extracts and uses sequence numbers
 
 ### 3. Tunnel State Machine
 
