@@ -318,20 +318,86 @@ fn buildGtpuPacket(buffer: *[2048]u8, teid: u32, payload: []const u8) usize {
     return pos;
 }
 
+// Build IPv4/UDP packet for test payload
+// Creates a valid IPv4 packet with UDP header that NAT can process
+fn buildIpv4UdpPacket(
+    buffer: *[1500]u8,
+    src_ip: [4]u8,
+    dst_ip: [4]u8,
+    src_port: u16,
+    dst_port: u16,
+    payload: []const u8,
+) usize {
+    const ip_header_len: usize = 20;
+    const udp_header_len: usize = 8;
+    const total_len: u16 = @intCast(ip_header_len + udp_header_len + payload.len);
+    const udp_len: u16 = @intCast(udp_header_len + payload.len);
+
+    // IPv4 Header (20 bytes)
+    buffer[0] = 0x45; // Version=4, IHL=5 (20 bytes)
+    buffer[1] = 0x00; // DSCP=0, ECN=0
+    std.mem.writeInt(u16, buffer[2..4], total_len, .big); // Total Length
+    std.mem.writeInt(u16, buffer[4..6], 0x1234, .big); // Identification
+    std.mem.writeInt(u16, buffer[6..8], 0x4000, .big); // Flags (DF) + Fragment Offset
+    buffer[8] = 64; // TTL
+    buffer[9] = 17; // Protocol: UDP
+    buffer[10] = 0; // Header checksum (computed later)
+    buffer[11] = 0;
+    @memcpy(buffer[12..16], &src_ip); // Source IP
+    @memcpy(buffer[16..20], &dst_ip); // Destination IP
+
+    // Calculate IP header checksum
+    var sum: u32 = 0;
+    var i: usize = 0;
+    while (i < ip_header_len) : (i += 2) {
+        sum += std.mem.readInt(u16, buffer[i..][0..2], .big);
+    }
+    while (sum >> 16 != 0) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    std.mem.writeInt(u16, buffer[10..12], @truncate(~sum), .big);
+
+    // UDP Header (8 bytes)
+    std.mem.writeInt(u16, buffer[20..22], src_port, .big); // Source Port
+    std.mem.writeInt(u16, buffer[22..24], dst_port, .big); // Destination Port
+    std.mem.writeInt(u16, buffer[24..26], udp_len, .big); // UDP Length
+    std.mem.writeInt(u16, buffer[26..28], 0, .big); // Checksum (optional for UDP over IPv4)
+
+    // Payload
+    @memcpy(buffer[28..][0..payload.len], payload);
+
+    return ip_header_len + udp_header_len + payload.len;
+}
+
 // Send GTP-U uplink packets
 fn sendUplinkPackets(state: *TestState, count: u32) !void {
     print("\n--- Sending {} uplink GTP-U packets (TEID=0x{x}) ---\n", .{ count, state.config.uplink_teid });
 
     var packet_buf: [2048]u8 = undefined;
+    var ip_packet_buf: [1500]u8 = undefined;
+
+    // UE IP from UE pool (10.45.x.x), sending to external destination
+    const ue_ip = [4]u8{ 10, 45, 0, 100 };
+    const external_dst_ip = [4]u8{ 8, 8, 8, 8 }; // DNS server as example
 
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        // Create simple payload (simulated IP packet)
-        var payload: [100]u8 = undefined;
-        @memset(&payload, @intCast(i % 256));
+        // Create UDP payload (test data)
+        var udp_payload: [50]u8 = undefined;
+        @memset(&udp_payload, @intCast(i % 256));
 
-        // Build GTP-U packet
-        const packet_len = buildGtpuPacket(&packet_buf, state.config.uplink_teid, payload[0..]);
+        // Build proper IPv4/UDP packet as GTP-U payload
+        const ip_packet_len = buildIpv4UdpPacket(
+            &ip_packet_buf,
+            ue_ip,
+            external_dst_ip,
+            12345 + @as(u16, @intCast(i)), // Source port varies
+            53, // DNS port
+            &udp_payload,
+        );
+
+        // Build GTP-U packet with IPv4 packet as payload
+        const packet_len = buildGtpuPacket(&packet_buf, state.config.uplink_teid, ip_packet_buf[0..ip_packet_len]);
 
         // Send packet
         _ = try std.posix.sendto(
@@ -346,7 +412,11 @@ fn sendUplinkPackets(state: *TestState, count: u32) !void {
         time.sleep(10 * time.ns_per_ms);
     }
 
-    print("✓ Sent {} uplink packets\n", .{count});
+    print("✓ Sent {} uplink packets (UE {}.{}.{}.{} -> {}.{}.{}.{})\n", .{
+        count,
+        ue_ip[0],    ue_ip[1],            ue_ip[2],            ue_ip[3],
+        external_dst_ip[0], external_dst_ip[1], external_dst_ip[2], external_dst_ip[3],
+    });
 }
 
 // Send GTP-U downlink packets
@@ -354,15 +424,30 @@ fn sendDownlinkPackets(state: *TestState, count: u32) !void {
     print("\n--- Sending {} downlink GTP-U packets (TEID=0x{x}) ---\n", .{ count, state.config.downlink_teid });
 
     var packet_buf: [2048]u8 = undefined;
+    var ip_packet_buf: [1500]u8 = undefined;
+
+    // External server sending to UE
+    const external_src_ip = [4]u8{ 8, 8, 8, 8 }; // DNS server
+    const ue_ip = [4]u8{ 10, 45, 0, 100 };
 
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        // Create simple payload
-        var payload: [100]u8 = undefined;
-        @memset(&payload, @intCast((i + 100) % 256));
+        // Create UDP payload (test data)
+        var udp_payload: [50]u8 = undefined;
+        @memset(&udp_payload, @intCast((i + 100) % 256));
 
-        // Build GTP-U packet
-        const packet_len = buildGtpuPacket(&packet_buf, state.config.downlink_teid, payload[0..]);
+        // Build proper IPv4/UDP packet as GTP-U payload
+        const ip_packet_len = buildIpv4UdpPacket(
+            &ip_packet_buf,
+            external_src_ip,
+            ue_ip,
+            53, // DNS port
+            12345 + @as(u16, @intCast(i)), // Destination port varies
+            &udp_payload,
+        );
+
+        // Build GTP-U packet with IPv4 packet as payload
+        const packet_len = buildGtpuPacket(&packet_buf, state.config.downlink_teid, ip_packet_buf[0..ip_packet_len]);
 
         // Send packet
         _ = try std.posix.sendto(
