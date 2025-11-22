@@ -183,6 +183,96 @@ If the TUN interface is not available, PicoUP runs in "stub mode":
 
 This is useful for testing session management without network setup.
 
+## Examples
+
+The `examples/` directory contains tools for testing the complete data path.
+
+### End-to-End Test with Echo Server
+
+This demonstrates the complete N3 → UPF → N6 → Echo Server → N6 → UPF → N3 flow.
+
+**Terminal 1: Start Echo Server (N6 side)**
+```bash
+# Build examples
+zig build
+
+# Start UDP echo server on port 9999
+./zig-out/bin/echo_server_n6 9999
+```
+
+**Terminal 2: Set up N6 and Start UPF**
+```bash
+# Set up TUN interface (if not already done)
+sudo ./scripts/setup_n6.sh setup
+
+# Start PicoUP
+./zig-out/bin/picoupf
+```
+
+**Terminal 3: Run N3 Client**
+```bash
+# Run client (simulates gNodeB + UE)
+# Usage: udp_client_n3 <echo_server_ip> [port]
+./zig-out/bin/udp_client_n3 127.0.0.1 9999
+```
+
+The N3 client will:
+1. Establish PFCP association with UPF
+2. Create a PFCP session with uplink/downlink PDRs and FARs
+3. Send GTP-U encapsulated UDP packets to the UPF
+4. Receive echoed responses via the GTP-U downlink path
+5. Clean up the session and association
+
+### Example Output
+
+**Echo Server:**
+```
+╔════════════════════════════════════════════════════════════╗
+║          UDP Echo Server (N6 Side)                        ║
+╚════════════════════════════════════════════════════════════╝
+
+Echo server listening on 0.0.0.0:9999
+[1] Received 22 bytes from 10.45.0.1:10000 - Echoed 22 bytes
+[2] Received 22 bytes from 10.45.0.1:10001 - Echoed 22 bytes
+```
+
+**N3 Client:**
+```
+╔════════════════════════════════════════════════════════════╗
+║          UDP Client (N3 Side - gNodeB Simulator)          ║
+╚════════════════════════════════════════════════════════════╝
+
+Step 1: PFCP Association Setup
+Sent PFCP Association Setup Request
+Received PFCP Association Setup Response - OK
+
+Step 2: PFCP Session Establishment
+  - PDR 1: Uplink (N3->N6), TEID=0x1000
+  - PDR 2: Downlink (N6->N3), UE IP=10.45.0.100
+  - FAR 1: Forward to N6
+  - FAR 2: Forward to N3 with GTP-U encap (TEID=0x2000)
+Received PFCP Session Establishment Response - OK
+
+Step 3: Sending UDP Packets via GTP-U Tunnel
+[TX 1] Sent: "Hello from UE! Packet #1" (52 bytes)
+[RX 1] Received echo (TEID=0x2000): "Hello from UE! Packet #1"
+
+Results: Sent=5, Received=5, Lost=0
+```
+
+### Build Commands
+
+```bash
+# Build everything including examples
+zig build
+
+# Build and run echo server
+zig build example-echo-server -- 9999
+
+# Build and run N3 client
+zig build example-n3-client -- 127.0.0.1 9999
+```
+
 ## Statistics
 
 The UPF prints statistics every 5 seconds:
@@ -262,6 +352,9 @@ PicoUP/
 │   └── gtpu/                 # GTP-U data plane modules
 │       ├── handler.zig       # GTP-U header parsing/creation
 │       └── worker.zig        # Worker threads and packet processing pipeline
+├── examples/
+│   ├── echo_server_n6.zig    # UDP echo server for N6 testing
+│   └── udp_client_n3.zig     # GTP-U client simulating gNodeB + UE
 ├── scripts/
 │   └── setup_n6.sh           # N6 TUN interface setup script
 ├── deps/                      # Dependencies (git submodules)
