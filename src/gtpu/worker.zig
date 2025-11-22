@@ -6,6 +6,9 @@ const types = @import("../types.zig");
 const stats_mod = @import("../stats.zig");
 const session_mod = @import("../session.zig");
 const handler = @import("handler.zig");
+const nat_mod = @import("../nat.zig");
+const checksum = @import("../checksum.zig");
+const tun_mod = @import("../tun.zig");
 
 const net = std.net;
 const print = std.debug.print;
@@ -554,7 +557,12 @@ fn trackUsage(ctx: *PacketContext, stats: *stats_mod.Stats) bool {
 }
 
 // Pipeline Stage 9: Execute FAR action (forward/drop)
-fn executeFAR(ctx: *PacketContext, stats: *stats_mod.Stats) void {
+fn executeFAR(
+    ctx: *PacketContext,
+    stats: *stats_mod.Stats,
+    nat_table: ?*nat_mod.NATTable,
+    tun_device: ?*tun_mod.OptionalTun,
+) void {
     if (ctx.far) |far| {
         switch (far.action) {
             0 => { // Drop
@@ -562,7 +570,7 @@ fn executeFAR(ctx: *PacketContext, stats: *stats_mod.Stats) void {
                 _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
             },
             1 => { // Forward
-                forwardPacket(ctx, far, stats);
+                forwardPacket(ctx, far, stats, nat_table, tun_device);
             },
             2 => { // Buffer
                 print("Worker {}: Buffering not implemented, TEID: 0x{x}\n", .{ ctx.thread_id, ctx.header.teid });
@@ -577,10 +585,16 @@ fn executeFAR(ctx: *PacketContext, stats: *stats_mod.Stats) void {
 }
 
 // Forward packet based on destination interface
-fn forwardPacket(ctx: *PacketContext, far: *types.FAR, stats: *stats_mod.Stats) void {
+fn forwardPacket(
+    ctx: *PacketContext,
+    far: *types.FAR,
+    stats: *stats_mod.Stats,
+    nat_table: ?*nat_mod.NATTable,
+    tun_device: ?*tun_mod.OptionalTun,
+) void {
     switch (far.dest_interface) {
         0 => forwardToN3(ctx, far, stats), // Access
-        1 => forwardToN6(ctx, far, stats), // Core
+        1 => forwardToN6(ctx, far, stats, nat_table, tun_device), // Core (with NAT)
         2 => forwardToN9(ctx, far, stats), // UPF-to-UPF
         else => {
             print("Worker {}: Unknown dest_interface: {}\n", .{ ctx.thread_id, far.dest_interface });
@@ -621,14 +635,82 @@ fn forwardToN3(ctx: *PacketContext, far: *types.FAR, stats: *stats_mod.Stats) vo
     _ = stats.n3_packets_tx.fetchAdd(1, .seq_cst);
 }
 
-// Forward to N6 (Core/Data Network)
-fn forwardToN6(ctx: *PacketContext, far: *types.FAR, stats: *stats_mod.Stats) void {
+// Forward to N6 (Core/Data Network) with NAT
+fn forwardToN6(
+    ctx: *PacketContext,
+    far: *types.FAR,
+    stats: *stats_mod.Stats,
+    nat_table: ?*nat_mod.NATTable,
+    tun_device: ?*tun_mod.OptionalTun,
+) void {
     _ = far;
-    print("Worker {}: Forwarding to N6 (Core), TEID: 0x{x}, size: {} bytes\n", .{ ctx.thread_id, ctx.header.teid, ctx.payload.len });
 
-    // For N6, we would send the decapsulated IP packet to the data network
-    // This requires a separate socket and routing setup
-    // For now, just count as forwarded
+    // Check if we have NAT and TUN configured
+    if (nat_table == null or tun_device == null) {
+        // Stub mode - just count as forwarded
+        print("Worker {}: N6 stub mode - TEID: 0x{x}, size: {} bytes\n", .{ ctx.thread_id, ctx.header.teid, ctx.payload.len });
+        _ = stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
+        _ = stats.n6_packets_tx.fetchAdd(1, .seq_cst);
+        return;
+    }
+
+    const nat = nat_table.?;
+    const tun = tun_device.?;
+
+    // Get mutable copy of payload for NAT rewriting
+    var packet_buf: [2048]u8 = undefined;
+    const payload_len = ctx.payload.len;
+    if (payload_len > packet_buf.len or payload_len < 20) {
+        print("Worker {}: Invalid packet size for N6: {} bytes\n", .{ ctx.thread_id, payload_len });
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    }
+    @memcpy(packet_buf[0..payload_len], ctx.payload);
+
+    // Extract UE source address and port from inner IP packet
+    const src_ip = [4]u8{ packet_buf[12], packet_buf[13], packet_buf[14], packet_buf[15] };
+    const protocol = packet_buf[9];
+    const ihl = (packet_buf[0] & 0x0F) * 4;
+
+    var src_port: u16 = 0;
+    if ((protocol == 6 or protocol == 17) and payload_len >= ihl + 2) {
+        src_port = std.mem.readInt(u16, packet_buf[ihl..][0..2], .big);
+    }
+
+    // Get session SEID for NAT entry binding
+    const seid = if (ctx.session) |s| s.seid else 0;
+
+    // Get or create NAT mapping
+    const nat_entry = nat.getOrCreateMapping(src_ip, src_port, protocol, seid) orelse {
+        print("Worker {}: NAT table full, dropping packet\n", .{ctx.thread_id});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    };
+
+    // Perform SNAT (Source NAT) - rewrite source IP and port
+    if (!checksum.applySNAT(packet_buf[0..payload_len], payload_len, nat_entry.external_ip, nat_entry.external_port)) {
+        print("Worker {}: SNAT failed\n", .{ctx.thread_id});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    }
+
+    // Update NAT entry statistics
+    nat_entry.updateStats(payload_len);
+
+    // Send via TUN interface
+    _ = tun.write(packet_buf[0..payload_len]) catch |err| {
+        print("Worker {}: Failed to send to N6 TUN: {}\n", .{ ctx.thread_id, err });
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    };
+
+    print("Worker {}: N6 TX via NAT: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}, {} bytes\n", .{
+        ctx.thread_id,
+        src_ip[0],                 src_ip[1],                 src_ip[2],                 src_ip[3],                 src_port,
+        nat_entry.external_ip[0], nat_entry.external_ip[1], nat_entry.external_ip[2], nat_entry.external_ip[3], nat_entry.external_port,
+        payload_len,
+    });
+
     _ = stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
     _ = stats.n6_packets_tx.fetchAdd(1, .seq_cst);
 }
@@ -672,6 +754,8 @@ pub fn gtpuWorkerThread(
     session_manager: *session_mod.SessionManager,
     stats: *stats_mod.Stats,
     should_stop: *Atomic(bool),
+    nat_table: ?*nat_mod.NATTable,
+    tun_device: ?*tun_mod.OptionalTun,
 ) void {
     print("GTP-U worker thread {} started\n", .{thread_id});
 
@@ -705,11 +789,143 @@ pub fn gtpuWorkerThread(
             if (!enforceQoS(&ctx, stats)) continue;
             if (!lookupURR(&ctx, stats)) continue;
             if (!trackUsage(&ctx, stats)) continue;
-            executeFAR(&ctx, stats);
+            executeFAR(&ctx, stats, nat_table, tun_device);
         } else {
             time.sleep(1 * time.ns_per_ms);
         }
     }
 
     print("GTP-U worker thread {} stopped\n", .{thread_id});
+}
+
+/// Process a downlink packet from the N6 data network
+/// This is called from the N6 receiver thread for packets returning from the internet
+/// Steps:
+/// 1. Reverse NAT lookup to find original UE IP/port
+/// 2. Find session by UE IP
+/// 3. Match PDR with source_interface=1 (N6)
+/// 4. Execute FAR (typically re-encapsulate with GTP-U and forward to gNodeB via N3)
+pub fn processN6Downlink(
+    packet: []u8,
+    packet_len: usize,
+    nat_table: *nat_mod.NATTable,
+    session_manager: *session_mod.SessionManager,
+    stats: *stats_mod.Stats,
+    gtpu_socket: std.posix.socket_t,
+) void {
+    if (packet_len < 20) {
+        print("N6 Downlink: Packet too small: {} bytes\n", .{packet_len});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    }
+
+    // Verify IPv4
+    const version = packet[0] >> 4;
+    if (version != 4) {
+        print("N6 Downlink: Not IPv4 packet\n", .{});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    }
+
+    // Extract destination IP and port (this is the NAT'ed external address)
+    const dst_ip = [4]u8{ packet[16], packet[17], packet[18], packet[19] };
+    const protocol = packet[9];
+    const ihl = (packet[0] & 0x0F) * 4;
+
+    var dst_port: u16 = 0;
+    if ((protocol == 6 or protocol == 17) and packet_len >= ihl + 4) {
+        dst_port = std.mem.readInt(u16, packet[ihl + 2..][0..2], .big);
+    }
+
+    // Look up NAT entry by external port to find original UE
+    const nat_entry = nat_table.lookupByExternal(dst_port, protocol) orelse {
+        print("N6 Downlink: No NAT entry for port {} proto {}\n", .{ dst_port, protocol });
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        _ = stats.n6_nat_misses.fetchAdd(1, .seq_cst);
+        return;
+    };
+
+    _ = stats.n6_nat_hits.fetchAdd(1, .seq_cst);
+
+    // Apply DNAT - restore original UE IP and port
+    if (!checksum.applyDNAT(packet, packet_len, nat_entry.ue_ip, nat_entry.ue_port)) {
+        print("N6 Downlink: DNAT failed\n", .{});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    }
+
+    // Update NAT entry statistics
+    nat_entry.updateStats(packet_len);
+
+    // Find session and PDR by UE IP for downlink
+    const match = session_manager.findSessionByUeIp(nat_entry.ue_ip, protocol, dst_port) orelse {
+        print("N6 Downlink: No session for UE {}.{}.{}.{}\n", .{
+            nat_entry.ue_ip[0], nat_entry.ue_ip[1], nat_entry.ue_ip[2], nat_entry.ue_ip[3],
+        });
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    };
+
+    const session = match.session;
+    const pdr = match.pdr;
+
+    // Find the associated FAR
+    const far = session.findFAR(pdr.far_id) orelse {
+        print("N6 Downlink: FAR {} not found\n", .{pdr.far_id});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    };
+
+    // FAR should specify N3 destination with outer header creation
+    if (far.dest_interface != 0 or !far.outer_header_creation) {
+        print("N6 Downlink: FAR {} not configured for N3 forwarding\n", .{far.id});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    }
+
+    // Apply QoS if QER is configured
+    if (pdr.has_qer) {
+        if (session.findQER(pdr.qer_id)) |qer| {
+            // Simplified QoS check - full implementation would use token bucket
+            _ = qer; // QoS enforcement could be added here
+        }
+    }
+
+    // Track usage if URR is configured
+    if (pdr.has_urr) {
+        if (session.findURR(pdr.urr_id)) |urr| {
+            // Track downlink volume
+            _ = urr.volume_downlink.fetchAdd(packet_len, .seq_cst);
+            _ = urr.volume_total.fetchAdd(packet_len, .seq_cst);
+            _ = stats.urr_packets_tracked.fetchAdd(1, .seq_cst);
+        }
+    }
+
+    // Re-encapsulate with GTP-U and forward to gNodeB (N3)
+    var out_buffer: [2048]u8 = undefined;
+    const out_len = handler.createGtpuHeader(&out_buffer, far.teid, packet[0..packet_len]);
+
+    if (out_len == 0) {
+        print("N6 Downlink: Failed to create GTP-U header\n", .{});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    }
+
+    // Send to gNodeB
+    const dest_addr = net.Address.initIp4(far.ipv4, types.GTPU_PORT);
+
+    _ = std.posix.sendto(gtpu_socket, out_buffer[0..out_len], 0, &dest_addr.any, dest_addr.getOsSockLen()) catch |err| {
+        print("N6 Downlink: Failed to send to N3: {}\n", .{err});
+        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
+        return;
+    };
+
+    print("N6 Downlink: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} via GTP-U TEID 0x{x}\n", .{
+        dst_ip[0],            dst_ip[1],            dst_ip[2],            dst_ip[3],            dst_port,
+        nat_entry.ue_ip[0], nat_entry.ue_ip[1], nat_entry.ue_ip[2], nat_entry.ue_ip[3], nat_entry.ue_port,
+        far.teid,
+    });
+
+    _ = stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
+    _ = stats.n3_packets_tx.fetchAdd(1, .seq_cst);
 }

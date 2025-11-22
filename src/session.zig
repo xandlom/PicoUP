@@ -427,4 +427,60 @@ pub const SessionManager = struct {
         }
         return false;
     }
+
+    /// Find session by UE IP address and flow information (for downlink N6 traffic)
+    /// Matches PDRs with source_interface=1 (N6/Core) that have matching UE IP
+    /// Returns the session and matching PDR, or null if not found
+    pub fn findSessionByUeIp(
+        self: *SessionManager,
+        ue_ip: [4]u8,
+        protocol: u8,
+        dst_port: u16,
+    ) ?struct { session: *Session, pdr: *PDR } {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var best_match: ?struct { session: *Session, pdr: *PDR } = null;
+        var highest_precedence: u32 = 0;
+
+        for (0..types.MAX_SESSIONS) |i| {
+            if (!self.sessions[i].allocated) continue;
+
+            var session = &self.sessions[i];
+            session.mutex.lock();
+            defer session.mutex.unlock();
+
+            for (0..session.pdr_count) |j| {
+                var pdr = &session.pdrs[j];
+                if (!pdr.allocated) continue;
+
+                // Match PDRs with source_interface=1 (N6/Core) for downlink
+                if (pdr.pdi.source_interface != 1) continue;
+
+                // Match UE IP address
+                if (pdr.pdi.has_ue_ip) {
+                    if (!std.mem.eql(u8, &pdr.pdi.ue_ip, &ue_ip)) continue;
+                }
+
+                // Match SDF filter (protocol and port)
+                if (pdr.pdi.has_sdf_filter) {
+                    // Check protocol (0 means any)
+                    if (pdr.pdi.sdf_protocol != 0 and pdr.pdi.sdf_protocol != protocol) continue;
+
+                    // Check destination port range
+                    if (pdr.pdi.sdf_dest_port_low > 0 or pdr.pdi.sdf_dest_port_high > 0) {
+                        if (dst_port < pdr.pdi.sdf_dest_port_low or dst_port > pdr.pdi.sdf_dest_port_high) continue;
+                    }
+                }
+
+                // Found a match - check precedence
+                if (best_match == null or pdr.precedence > highest_precedence) {
+                    best_match = .{ .session = session, .pdr = pdr };
+                    highest_precedence = pdr.precedence;
+                }
+            }
+        }
+
+        return best_match;
+    }
 };
