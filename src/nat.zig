@@ -45,7 +45,7 @@ pub const NATEntry = struct {
 
     /// Update last activity timestamp
     pub fn touch(self: *NATEntry) void {
-        _ = self.last_activity.store(time.nanoTimestamp(), .seq_cst);
+        _ = self.last_activity.store(@intCast(time.nanoTimestamp()), .seq_cst);
     }
 
     /// Update traffic counters
@@ -148,7 +148,7 @@ pub const NATTable = struct {
                     .external_ip = self.external_ip,
                     .external_port = self.allocatePort(),
                     .seid = seid,
-                    .last_activity = Atomic(i64).init(time.nanoTimestamp()),
+                    .last_activity = Atomic(i64).init(@intCast(time.nanoTimestamp())),
                     .packet_count = Atomic(u64).init(0),
                     .byte_count = Atomic(u64).init(0),
                     .allocated = true,

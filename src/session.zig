@@ -10,6 +10,12 @@ const Mutex = std.Thread.Mutex;
 const Atomic = std.atomic.Value;
 const print = std.debug.print;
 
+/// Result type for findSessionByUeIp lookup
+pub const SessionPdrMatch = struct {
+    session: *Session,
+    pdr: *PDR,
+};
+
 // PFCP Session
 // Represents a PFCP session with associated PDRs, FARs, QERs, and URRs
 pub const Session = struct {
@@ -436,11 +442,11 @@ pub const SessionManager = struct {
         ue_ip: [4]u8,
         protocol: u8,
         dst_port: u16,
-    ) ?struct { session: *Session, pdr: *PDR } {
+    ) ?SessionPdrMatch {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var best_match: ?struct { session: *Session, pdr: *PDR } = null;
+        var best_match: ?SessionPdrMatch = null;
         var highest_precedence: u32 = 0;
 
         for (0..types.MAX_SESSIONS) |i| {
@@ -475,7 +481,7 @@ pub const SessionManager = struct {
 
                 // Found a match - check precedence
                 if (best_match == null or pdr.precedence > highest_precedence) {
-                    best_match = .{ .session = session, .pdr = pdr };
+                    best_match = SessionPdrMatch{ .session = session, .pdr = pdr };
                     highest_precedence = pdr.precedence;
                 }
             }
