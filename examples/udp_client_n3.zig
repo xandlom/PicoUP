@@ -22,7 +22,9 @@ const pfcp = @import("zig-pfcp");
 const UPF_IP = "127.0.0.1";
 const PFCP_PORT: u16 = 8805;
 const GTPU_PORT: u16 = 2152;
-const LOCAL_GTPU_PORT: u16 = 2153; // Local port for receiving GTP-U responses
+// Use 127.0.0.2 for gNodeB to avoid sending downlink packets to UPF's own port
+// The UPF sends downlink to gNodeB_IP:2152, so we bind to 127.0.0.2:2152
+const GNODEB_IP = "127.0.0.2";
 const DEFAULT_ECHO_PORT: u16 = 9999;
 
 // Session parameters
@@ -84,6 +86,7 @@ pub fn main() !void {
     print("\n", .{});
     print("Configuration:\n", .{});
     print("  UPF Address:     {s}:{} (PFCP), {s}:{} (GTP-U)\n", .{ UPF_IP, PFCP_PORT, UPF_IP, GTPU_PORT });
+    print("  gNodeB Address:  {s}:{} (for downlink)\n", .{ GNODEB_IP, GTPU_PORT });
     print("  Echo Server:     {}.{}.{}.{}:{}\n", .{ echo_server_ip[0], echo_server_ip[1], echo_server_ip[2], echo_server_ip[3], echo_server_port });
     print("  UE IP:           {}.{}.{}.{}\n", .{ UE_IP[0], UE_IP[1], UE_IP[2], UE_IP[3] });
     print("  Uplink TEID:     0x{x}\n", .{UPLINK_TEID});
@@ -97,9 +100,10 @@ pub fn main() !void {
     const gtpu_socket = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, posix.IPPROTO.UDP);
     defer posix.close(gtpu_socket);
 
-    // Bind GTP-U socket to local port to receive responses
-    const local_gtpu_addr = net.Address.initIp4(.{ 0, 0, 0, 0 }, LOCAL_GTPU_PORT);
-    try posix.bind(gtpu_socket, &local_gtpu_addr.any, local_gtpu_addr.getOsSockLen());
+    // Bind GTP-U socket to gNodeB address (127.0.0.2:2152) to receive downlink responses
+    // This avoids conflict with UPF's GTP-U port on 127.0.0.1:2152
+    const gnodeb_addr = try net.Address.parseIp4(GNODEB_IP, GTPU_PORT);
+    try posix.bind(gtpu_socket, &gnodeb_addr.any, gnodeb_addr.getOsSockLen());
 
     // Set receive timeout on GTP-U socket
     const timeout = posix.timeval{ .sec = 2, .usec = 0 };
@@ -244,8 +248,9 @@ fn sendSessionEstablishment(state: *State) !void {
     try pfcp.marshal.encodeCreateFAR(&writer, create_far_ul);
 
     // Create FAR for downlink (forward to N3 with GTP-U encapsulation)
+    // Use 127.0.0.2 as gNodeB IP so downlink packets don't go back to UPF
     const fwd_params = pfcp.ie.ForwardingParameters.init(pfcp.ie.DestinationInterface.init(.access)) // Access (N3)
-        .withOuterHeaderCreation(pfcp.ie.OuterHeaderCreation.initGtpuV4(DOWNLINK_TEID, [_]u8{ 127, 0, 0, 1 }));
+        .withOuterHeaderCreation(pfcp.ie.OuterHeaderCreation.initGtpuV4(DOWNLINK_TEID, [_]u8{ 127, 0, 0, 2 }));
     const create_far_dl = pfcp.ie.CreateFAR.init(
         pfcp.ie.FARID.init(2),
         pfcp.ie.ApplyAction.forward(),
@@ -261,7 +266,7 @@ fn sendSessionEstablishment(state: *State) !void {
     print("  - PDR 1: Uplink (N3->N6), TEID=0x{x}\n", .{UPLINK_TEID});
     print("  - PDR 2: Downlink (N6->N3), UE IP={}.{}.{}.{}\n", .{ UE_IP[0], UE_IP[1], UE_IP[2], UE_IP[3] });
     print("  - FAR 1: Forward to N6\n", .{});
-    print("  - FAR 2: Forward to N3 with GTP-U encap (TEID=0x{x})\n", .{DOWNLINK_TEID});
+    print("  - FAR 2: Forward to N3 with GTP-U encap (TEID=0x{x}, gNodeB={s})\n", .{ DOWNLINK_TEID, GNODEB_IP });
 
     // Wait for response
     var resp: [2048]u8 = undefined;
