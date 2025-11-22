@@ -18,13 +18,16 @@ const print = std.debug.print;
 const time = std.time;
 const pfcp = @import("zig-pfcp");
 
-// Configuration
-const UPF_IP = "127.0.0.1";
+// Configuration - these can be overridden via command line arguments
+// For distributed deployment:
+//   - UPF_IP should be the IP of the machine running picoupf
+//   - GNODEB_IP should be the IP of THIS machine (where client runs), reachable from UPF
+// For local testing (all on same machine):
+//   - Use 127.0.0.1 for UPF and 127.0.0.2 for gNodeB
+var upf_ip_str: []const u8 = "127.0.0.1";
+var gnodeb_ip_str: []const u8 = "127.0.0.2";
 const PFCP_PORT: u16 = 8805;
 const GTPU_PORT: u16 = 2152;
-// Use 127.0.0.2 for gNodeB to avoid sending downlink packets to UPF's own port
-// The UPF sends downlink to gNodeB_IP:2152, so we bind to 127.0.0.2:2152
-const GNODEB_IP = "127.0.0.2";
 const DEFAULT_ECHO_PORT: u16 = 9999;
 
 // Session parameters
@@ -42,6 +45,7 @@ const State = struct {
     echo_server_port: u16,
     sequence_number: u32,
     up_seid: u64,
+    gnodeb_ip: [4]u8, // gNodeB IP for downlink (where UPF sends GTP-U responses)
 
     fn nextSeq(self: *State) u32 {
         const seq = self.sequence_number;
@@ -60,15 +64,23 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) {
-        print("Usage: {s} <echo_server_ip> [echo_server_port]\n", .{args[0]});
-        print("Example: {s} 192.168.1.100 9999\n", .{args[0]});
+        print("Usage: {s} <echo_server_ip> [echo_server_port] [upf_ip] [gnodeb_ip]\n", .{args[0]});
+        print("\nArguments:\n", .{});
+        print("  echo_server_ip   - IP of the echo server (N6 side)\n", .{});
+        print("  echo_server_port - Port of echo server (default: 9999)\n", .{});
+        print("  upf_ip           - IP of the UPF (default: 127.0.0.1)\n", .{});
+        print("  gnodeb_ip        - IP of THIS machine for downlink (default: 127.0.0.2)\n", .{});
+        print("\nExamples:\n", .{});
+        print("  Local test:       {s} 127.0.0.1 9999\n", .{args[0]});
+        print("  Distributed:      {s} 192.168.1.30 9999 192.168.1.20 192.168.1.10\n", .{args[0]});
+        print("                    (echo on .30, UPF on .20, client on .10)\n", .{});
         return;
     }
 
     // Parse echo server IP
     const echo_ip_str = args[1];
     const echo_ip = net.Address.parseIp4(echo_ip_str, 0) catch {
-        print("Invalid IP address: {s}\n", .{echo_ip_str});
+        print("Invalid echo server IP address: {s}\n", .{echo_ip_str});
         return;
     };
     const echo_server_ip: [4]u8 = @bitCast(echo_ip.in.sa.addr);
@@ -79,14 +91,36 @@ pub fn main() !void {
     else
         DEFAULT_ECHO_PORT;
 
+    // Parse UPF IP (optional, default 127.0.0.1)
+    if (args.len > 3) {
+        upf_ip_str = args[3];
+    }
+    const upf_ip = net.Address.parseIp4(upf_ip_str, 0) catch {
+        print("Invalid UPF IP address: {s}\n", .{upf_ip_str});
+        return;
+    };
+    const upf_ip_bytes: [4]u8 = @bitCast(upf_ip.in.sa.addr);
+
+    // Parse gNodeB IP (optional, default 127.0.0.2)
+    // IMPORTANT: For distributed deployment, this must be the IP of this client machine
+    // that is reachable from the UPF, so the UPF can send downlink GTP-U packets back
+    if (args.len > 4) {
+        gnodeb_ip_str = args[4];
+    }
+    const gnodeb_ip = net.Address.parseIp4(gnodeb_ip_str, 0) catch {
+        print("Invalid gNodeB IP address: {s}\n", .{gnodeb_ip_str});
+        return;
+    };
+    const gnodeb_ip_bytes: [4]u8 = @bitCast(gnodeb_ip.in.sa.addr);
+
     print("\n", .{});
     print("╔════════════════════════════════════════════════════════════╗\n", .{});
     print("║          UDP Client (N3 Side - gNodeB Simulator)          ║\n", .{});
     print("╚════════════════════════════════════════════════════════════╝\n", .{});
     print("\n", .{});
     print("Configuration:\n", .{});
-    print("  UPF Address:     {s}:{} (PFCP), {s}:{} (GTP-U)\n", .{ UPF_IP, PFCP_PORT, UPF_IP, GTPU_PORT });
-    print("  gNodeB Address:  {s}:{} (for downlink)\n", .{ GNODEB_IP, GTPU_PORT });
+    print("  UPF Address:     {s}:{} (PFCP), {s}:{} (GTP-U)\n", .{ upf_ip_str, PFCP_PORT, upf_ip_str, GTPU_PORT });
+    print("  gNodeB Address:  {s}:{} (for downlink)\n", .{ gnodeb_ip_str, GTPU_PORT });
     print("  Echo Server:     {}.{}.{}.{}:{}\n", .{ echo_server_ip[0], echo_server_ip[1], echo_server_ip[2], echo_server_ip[3], echo_server_port });
     print("  UE IP:           {}.{}.{}.{}\n", .{ UE_IP[0], UE_IP[1], UE_IP[2], UE_IP[3] });
     print("  Uplink TEID:     0x{x}\n", .{UPLINK_TEID});
@@ -100,10 +134,11 @@ pub fn main() !void {
     const gtpu_socket = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, posix.IPPROTO.UDP);
     defer posix.close(gtpu_socket);
 
-    // Bind GTP-U socket to gNodeB address (127.0.0.2:2152) to receive downlink responses
-    // This avoids conflict with UPF's GTP-U port on 127.0.0.1:2152
-    const gnodeb_addr = try net.Address.parseIp4(GNODEB_IP, GTPU_PORT);
-    try posix.bind(gtpu_socket, &gnodeb_addr.any, gnodeb_addr.getOsSockLen());
+    // Bind GTP-U socket to gNodeB address to receive downlink responses
+    // For local testing with 127.0.0.2, this avoids conflict with UPF's GTP-U port on 127.0.0.1:2152
+    // For distributed deployment, this binds to the actual interface IP
+    const gnodeb_bind_addr = net.Address.initIp4(gnodeb_ip_bytes, GTPU_PORT);
+    try posix.bind(gtpu_socket, &gnodeb_bind_addr.any, gnodeb_bind_addr.getOsSockLen());
 
     // Set receive timeout on GTP-U socket
     const timeout = posix.timeval{ .sec = 2, .usec = 0 };
@@ -112,12 +147,13 @@ pub fn main() !void {
     var state = State{
         .pfcp_socket = pfcp_socket,
         .gtpu_socket = gtpu_socket,
-        .upf_pfcp_addr = try net.Address.parseIp4(UPF_IP, PFCP_PORT),
-        .upf_gtpu_addr = try net.Address.parseIp4(UPF_IP, GTPU_PORT),
+        .upf_pfcp_addr = net.Address.initIp4(upf_ip_bytes, PFCP_PORT),
+        .upf_gtpu_addr = net.Address.initIp4(upf_ip_bytes, GTPU_PORT),
         .echo_server_ip = echo_server_ip,
         .echo_server_port = echo_server_port,
         .sequence_number = 1,
         .up_seid = 0,
+        .gnodeb_ip = gnodeb_ip_bytes,
     };
 
     // Step 1: PFCP Association Setup
@@ -248,9 +284,10 @@ fn sendSessionEstablishment(state: *State) !void {
     try pfcp.marshal.encodeCreateFAR(&writer, create_far_ul);
 
     // Create FAR for downlink (forward to N3 with GTP-U encapsulation)
-    // Use 127.0.0.2 as gNodeB IP so downlink packets don't go back to UPF
+    // gNodeB IP is where the UPF will send downlink GTP-U packets
+    // For distributed deployment, this MUST be the actual IP of the client machine
     const fwd_params = pfcp.ie.ForwardingParameters.init(pfcp.ie.DestinationInterface.init(.access)) // Access (N3)
-        .withOuterHeaderCreation(pfcp.ie.OuterHeaderCreation.initGtpuV4(DOWNLINK_TEID, [_]u8{ 127, 0, 0, 2 }));
+        .withOuterHeaderCreation(pfcp.ie.OuterHeaderCreation.initGtpuV4(DOWNLINK_TEID, state.gnodeb_ip));
     const create_far_dl = pfcp.ie.CreateFAR.init(
         pfcp.ie.FARID.init(2),
         pfcp.ie.ApplyAction.forward(),
@@ -266,7 +303,7 @@ fn sendSessionEstablishment(state: *State) !void {
     print("  - PDR 1: Uplink (N3->N6), TEID=0x{x}\n", .{UPLINK_TEID});
     print("  - PDR 2: Downlink (N6->N3), UE IP={}.{}.{}.{}\n", .{ UE_IP[0], UE_IP[1], UE_IP[2], UE_IP[3] });
     print("  - FAR 1: Forward to N6\n", .{});
-    print("  - FAR 2: Forward to N3 with GTP-U encap (TEID=0x{x}, gNodeB={s})\n", .{ DOWNLINK_TEID, GNODEB_IP });
+    print("  - FAR 2: Forward to N3 with GTP-U encap (TEID=0x{x}, gNodeB={}.{}.{}.{})\n", .{ DOWNLINK_TEID, state.gnodeb_ip[0], state.gnodeb_ip[1], state.gnodeb_ip[2], state.gnodeb_ip[3] });
 
     // Wait for response
     var resp: [2048]u8 = undefined;
