@@ -96,4 +96,44 @@ pub fn build(b: *std.Build) void {
 
     const urr_test_step = b.step("test-urr", "Run URR integration test");
     urr_test_step.dependOn(&run_urr_test.step);
+
+    // Build N6 Echo Server example
+    const echo_server = b.addExecutable(.{
+        .name = "echo_server_n6",
+        .root_source_file = b.path("examples/echo_server_n6.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    b.installArtifact(echo_server);
+
+    const run_echo_server = b.addRunArtifact(echo_server);
+    run_echo_server.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_echo_server.addArgs(args);
+    }
+
+    const echo_server_step = b.step("example-echo-server", "Run N6 echo server");
+    echo_server_step.dependOn(&run_echo_server.step);
+
+    // Build N3 UDP Client example
+    const n3_client = b.addExecutable(.{
+        .name = "udp_client_n3",
+        .root_source_file = b.path("examples/udp_client_n3.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    n3_client.root_module.addImport("zig-pfcp", pfcp_module);
+
+    b.installArtifact(n3_client);
+
+    const run_n3_client = b.addRunArtifact(n3_client);
+    run_n3_client.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_n3_client.addArgs(args);
+    }
+
+    const n3_client_step = b.step("example-n3-client", "Run N3 UDP client");
+    n3_client_step.dependOn(&run_n3_client.step);
 }

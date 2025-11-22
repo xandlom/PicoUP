@@ -14,6 +14,8 @@ const stats_mod = @import("stats.zig");
 const pfcp_handler = @import("pfcp/handler.zig");
 const gtpu_worker = @import("gtpu/worker.zig");
 const gtpu_handler = @import("gtpu/handler.zig");
+const nat_mod = @import("nat.zig");
+const tun_mod = @import("tun.zig");
 
 // Re-export constants from types module
 const WORKER_THREADS = types.WORKER_THREADS;
@@ -28,6 +30,10 @@ var pfcp_association_established: Atomic(bool) = Atomic(bool).init(false);
 var should_stop: Atomic(bool) = Atomic(bool).init(false);
 var gtpu_socket: std.posix.socket_t = undefined;
 pub var upf_ipv4: [4]u8 = undefined;
+
+// N6 NAT and TUN interface
+var nat_table: nat_mod.NATTable = undefined;
+var tun_device: tun_mod.OptionalTun = undefined;
 
 // PFCP thread - handles control plane messages
 fn pfcpThread(allocator: std.mem.Allocator) !void {
@@ -142,6 +148,53 @@ fn gtpuThread(allocator: std.mem.Allocator) !void {
     print("GTP-U thread stopped\n", .{});
 }
 
+// N6 receiver thread - receives packets from data network via TUN
+fn n6ReceiverThread() void {
+    print("N6 receiver thread started\n", .{});
+
+    // Check if TUN device is available
+    if (tun_device.isStubMode()) {
+        print("N6 receiver: TUN not available, thread exiting\n", .{});
+        print("N6 receiver: To enable, run scripts/setup_n6.sh and restart UPF\n", .{});
+        return;
+    }
+
+    var buffer: [2048]u8 = undefined;
+
+    while (!should_stop.load(.seq_cst)) {
+        // Read packet from TUN device (this is a downlink packet from internet)
+        const bytes_read = tun_device.read(&buffer) catch |err| {
+            if (err == error.StubMode) {
+                std.time.sleep(100 * std.time.ns_per_ms);
+                continue;
+            }
+            print("N6 receiver: Read error: {}\n", .{err});
+            continue;
+        };
+
+        if (bytes_read < 20) continue; // Skip invalid packets
+
+        _ = global_stats.n6_packets_rx.fetchAdd(1, .seq_cst);
+
+        // Process the downlink packet (reverse NAT and forward to gNodeB)
+        gtpu_worker.processN6Downlink(
+            buffer[0..bytes_read],
+            bytes_read,
+            &nat_table,
+            &session_manager,
+            &global_stats,
+            gtpu_socket,
+        );
+    }
+
+    print("N6 receiver thread stopped\n", .{});
+}
+
+// NAT cleanup thread - periodically cleans up expired NAT entries
+fn natCleanupThread() void {
+    nat_mod.natCleanupThread(&nat_table, &should_stop);
+}
+
 // Main function - initialization and thread orchestration
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -157,9 +210,26 @@ pub fn main() !void {
     global_stats = stats_mod.Stats.init();
     session_manager = session_mod.SessionManager.init();
     packet_queue = gtpu_worker.PacketQueue.init();
-    upf_ipv4 = .{ 10, 0, 0, 1 }; // Default UPF IP
+    upf_ipv4 = types.N6_EXTERNAL_IP; // Use N6 external IP as UPF IP
 
-    // Start GTP-U worker threads
+    // Initialize N6 NAT table and TUN interface
+    nat_table = nat_mod.NATTable.init(types.N6_EXTERNAL_IP);
+    tun_device = tun_mod.OptionalTun.init(types.N6_TUN_DEVICE);
+    defer tun_device.close();
+
+    if (tun_device.isStubMode()) {
+        print("N6: Running in stub mode (TUN device '{}' not available)\n", .{std.fmt.fmtSliceEscapeLower(types.N6_TUN_DEVICE)});
+        print("N6: Uplink packets will be counted but not forwarded\n", .{});
+        print("N6: To enable N6 forwarding, run: scripts/setup_n6.sh\n\n", .{});
+    } else {
+        print("N6: TUN device '{}' attached, NAT enabled\n", .{std.fmt.fmtSliceEscapeLower(types.N6_TUN_DEVICE)});
+        print("N6: External IP: {}.{}.{}.{}\n\n", .{
+            types.N6_EXTERNAL_IP[0], types.N6_EXTERNAL_IP[1],
+            types.N6_EXTERNAL_IP[2], types.N6_EXTERNAL_IP[3],
+        });
+    }
+
+    // Start GTP-U worker threads (with NAT and TUN for N6 forwarding)
     var worker_threads: [WORKER_THREADS]Thread = undefined;
     for (0..WORKER_THREADS) |i| {
         worker_threads[i] = try Thread.spawn(.{}, gtpu_worker.gtpuWorkerThread, .{
@@ -168,6 +238,8 @@ pub fn main() !void {
             &session_manager,
             &global_stats,
             &should_stop,
+            &nat_table,
+            &tun_device,
         });
     }
 
@@ -176,6 +248,12 @@ pub fn main() !void {
 
     // Start GTP-U thread
     const gtpu_thread_handle = try Thread.spawn(.{}, gtpuThread, .{allocator});
+
+    // Start N6 receiver thread (for downlink from data network)
+    const n6_thread_handle = try Thread.spawn(.{}, n6ReceiverThread, .{});
+
+    // Start NAT cleanup thread
+    const nat_cleanup_handle = try Thread.spawn(.{}, natCleanupThread, .{});
 
     // Start statistics thread
     const stats_thread_handle = try Thread.spawn(.{}, stats_mod.statsThread, .{
@@ -187,6 +265,8 @@ pub fn main() !void {
     // Wait for threads (will run until Ctrl+C)
     pfcp_thread_handle.join();
     gtpu_thread_handle.join();
+    n6_thread_handle.join();
+    nat_cleanup_handle.join();
     for (worker_threads) |thread| {
         thread.join();
     }

@@ -35,6 +35,13 @@ pub const Stats = struct {
     gtpu_echo_requests: Atomic(u64), // Echo requests received and responded to
     gtpu_echo_responses: Atomic(u64), // Echo responses received
 
+    // N6 NAT statistics
+    n6_packets_rx: Atomic(u64), // Packets received from data network (downlink)
+    n6_nat_created: Atomic(u64), // NAT entries created
+    n6_nat_hits: Atomic(u64), // NAT table lookup hits
+    n6_nat_misses: Atomic(u64), // NAT table lookup misses
+    n6_nat_active: Atomic(usize), // Currently active NAT entries
+
     start_time: i64,
 
     pub fn init() Stats {
@@ -56,6 +63,11 @@ pub const Stats = struct {
             .urr_quota_exceeded = Atomic(u64).init(0),
             .gtpu_echo_requests = Atomic(u64).init(0),
             .gtpu_echo_responses = Atomic(u64).init(0),
+            .n6_packets_rx = Atomic(u64).init(0),
+            .n6_nat_created = Atomic(u64).init(0),
+            .n6_nat_hits = Atomic(u64).init(0),
+            .n6_nat_misses = Atomic(u64).init(0),
+            .n6_nat_active = Atomic(usize).init(0),
             .start_time = time.timestamp(),
         };
     }
@@ -105,6 +117,15 @@ pub fn statsThread(stats: *Stats, session_mgr: *session.SessionManager, should_s
         print("Interface TX: N3={}, N6={}, N9={}\n", .{ n3_tx, n6_tx, n9_tx });
         print("QoS: Passed={}, MBR Dropped={}, PPS Dropped={}\n", .{ qos_passed, qos_mbr_drop, qos_pps_drop });
         print("URR: Tracked={}, Reports={}, Quota Exceeded={}\n", .{ urr_tracked, urr_reports, urr_quota });
+
+        // N6 NAT statistics
+        const n6_rx = stats.n6_packets_rx.load(.seq_cst);
+        const nat_created = stats.n6_nat_created.load(.seq_cst);
+        const nat_hits = stats.n6_nat_hits.load(.seq_cst);
+        const nat_misses = stats.n6_nat_misses.load(.seq_cst);
+        const nat_active = stats.n6_nat_active.load(.seq_cst);
+        print("N6 NAT: RX={}, Active={}, Created={}, Hits={}, Misses={}\n", .{ n6_rx, nat_active, nat_created, nat_hits, nat_misses });
+
         print("Queue Size: {}\n", .{queue_sz});
         print("Worker Threads: {}\n", .{types.WORKER_THREADS});
         print("========================\n", .{});

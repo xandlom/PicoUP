@@ -10,6 +10,13 @@ pub const PFCP_PORT = 8805;
 pub const GTPU_PORT = 2152;
 pub const MAX_SESSIONS = 100;
 
+// N6 Interface Configuration
+// These constants configure the data network (N6) interface with NAT support
+pub const N6_TUN_DEVICE = "upf0"; // TUN device name for N6 interface
+pub const N6_EXTERNAL_IP = [4]u8{ 10, 45, 0, 1 }; // UPF's external IP for NAT
+pub const N6_UE_POOL_PREFIX = [4]u8{ 10, 45, 0, 0 }; // UE IP pool prefix
+pub const N6_UE_POOL_MASK: u8 = 16; // /16 subnet mask
+
 // Packet Detection Information (PDI) - optional matching criteria
 // Follows 3GPP TS 29.244 Section 5.2.1.2
 pub const PDI = struct {
