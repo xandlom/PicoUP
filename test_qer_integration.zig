@@ -102,219 +102,22 @@ fn encodePfcpMessage(buffer: []u8, comptime encodeFunc: anytype, args: anytype) 
     return writer.getWritten();
 }
 
-// Helper to manually encode grouped IEs
-// Note: zig-pfcp doesn't have encode functions for CreatePDR/FAR/QER yet,
-// so we manually encode them following 3GPP TS 29.244
+// Use zig-pfcp library's encode functions for grouped IEs
+// The library now provides encodeCreatePDR, encodeCreateFAR, encodeCreateQER
 
 fn encodeCreatePDR(writer: *pfcp.Writer, create_pdr: pfcp.ie.CreatePDR) !void {
-    const ie_start = writer.pos;
-
-    // IE Header: type (create_pdr = 1) + length (filled later)
-    try writer.writeU16(@intFromEnum(pfcp.types.IEType.create_pdr));
-    const length_pos = writer.pos;
-    try writer.writeU16(0); // placeholder
-
-    // PDR ID (IE type 56)
-    try writer.writeU16(@intFromEnum(pfcp.types.IEType.pdr_id));
-    try writer.writeU16(2); // length
-    try writer.writeU16(@intCast(create_pdr.pdr_id.rule_id));
-
-    // Precedence (IE type 29)
-    try writer.writeU16(@intFromEnum(pfcp.types.IEType.precedence));
-    try writer.writeU16(4); // length
-    try writer.writeU32(create_pdr.precedence.precedence);
-
-    // PDI (IE type 2) - grouped IE
-    const pdi_start = writer.pos;
-    try writer.writeU16(@intFromEnum(pfcp.types.IEType.pdi));
-    const pdi_length_pos = writer.pos;
-    try writer.writeU16(0); // placeholder
-
-    // Source Interface (IE type 20)
-    try writer.writeU16(@intFromEnum(pfcp.types.IEType.source_interface));
-    try writer.writeU16(1); // length
-    try writer.writeByte(@intFromEnum(create_pdr.pdi.source_interface.interface));
-
-    // F-TEID (IE type 21) if present
-    if (create_pdr.pdi.f_teid) |fteid| {
-        try pfcp.marshal.encodeFTEID(writer, fteid);
-    }
-
-    // Update PDI length
-    const pdi_length: u16 = @intCast(writer.pos - pdi_start - 4);
-    const saved_pos = writer.pos;
-    writer.pos = pdi_length_pos;
-    try writer.writeU16(pdi_length);
-    writer.pos = saved_pos;
-
-    // FAR ID (IE type not in enum, using raw value 108)
-    if (create_pdr.far_id) |far_id| {
-        try writer.writeU16(108); // FAR ID IE type
-        try writer.writeU16(4); // length
-        try writer.writeU32(far_id.far_id);
-    }
-
-    // QER ID (IE type not in enum, using raw value 109)
-    if (create_pdr.qer_ids) |qer_ids| {
-        for (qer_ids) |qer_id| {
-            try writer.writeU16(109); // QER ID IE type
-            try writer.writeU16(4); // length
-            try writer.writeU32(qer_id.qer_id);
-        }
-    }
-
-    // Outer Header Removal (IE type not in enum, using raw value 95) if present
-    if (create_pdr.outer_header_removal) |ohr| {
-        try writer.writeU16(95); // Outer Header Removal IE type
-        try writer.writeU16(1); // length
-        try writer.writeByte(@intFromEnum(ohr.description));
-    }
-
-    // Update CreatePDR length
-    const ie_length: u16 = @intCast(writer.pos - ie_start - 4);
-    const final_pos = writer.pos;
-    writer.pos = length_pos;
-    try writer.writeU16(ie_length);
-    writer.pos = final_pos;
+    // Use the zig-pfcp library's encode function
+    try pfcp.marshal.encodeCreatePDR(writer, create_pdr);
 }
 
 fn encodeCreateFAR(writer: *pfcp.Writer, create_far: pfcp.ie.CreateFAR) !void {
-    const ie_start = writer.pos;
-
-    // IE Header: type (create_far = 3) + length (filled later)
-    try writer.writeU16(@intFromEnum(pfcp.types.IEType.create_far));
-    const length_pos = writer.pos;
-    try writer.writeU16(0); // placeholder
-
-    // FAR ID (IE type 108)
-    try writer.writeU16(108); // FAR ID IE type
-    try writer.writeU16(4); // length
-    try writer.writeU32(create_far.far_id.far_id);
-
-    // Apply Action (IE type 44)
-    try writer.writeU16(@intFromEnum(pfcp.types.IEType.apply_action));
-    try writer.writeU16(2); // length (2 bytes for packed struct)
-    try writer.writeU16(@bitCast(create_far.apply_action.actions));
-
-    // Forwarding Parameters (IE type 4) if present
-    if (create_far.forwarding_parameters) |fwd_params| {
-        const fwd_start = writer.pos;
-        try writer.writeU16(@intFromEnum(pfcp.types.IEType.forwarding_parameters));
-        const fwd_length_pos = writer.pos;
-        try writer.writeU16(0); // placeholder
-
-        // Destination Interface (IE type 42)
-        try writer.writeU16(@intFromEnum(pfcp.types.IEType.destination_interface));
-        try writer.writeU16(1); // length
-        try writer.writeByte(@intFromEnum(fwd_params.destination_interface.interface));
-
-        // Outer Header Creation (IE type 84) if present
-        if (fwd_params.outer_header_creation) |ohc| {
-            try writer.writeU16(@intFromEnum(pfcp.types.IEType.outer_header_creation));
-
-            // Calculate length: 1 byte flags + optional fields
-            var ohc_length: u16 = 1; // flags byte
-            if (ohc.teid != null) ohc_length += 4;
-            if (ohc.ipv4 != null) ohc_length += 4;
-            if (ohc.ipv6 != null) ohc_length += 16;
-            if (ohc.port != null) ohc_length += 2;
-            if (ohc.ctag != null) ohc_length += 2;
-            if (ohc.stag != null) ohc_length += 2;
-
-            try writer.writeU16(ohc_length);
-
-            // Flags byte
-            try writer.writeByte(@bitCast(ohc.flags));
-
-            // Optional fields
-            if (ohc.teid) |teid| {
-                try writer.writeU32(teid);
-            }
-            if (ohc.ipv4) |ipv4| {
-                try writer.writeBytes(&ipv4);
-            }
-            if (ohc.ipv6) |ipv6| {
-                try writer.writeBytes(&ipv6);
-            }
-            if (ohc.port) |port| {
-                try writer.writeU16(port);
-            }
-            if (ohc.ctag) |ctag| {
-                try writer.writeU16(ctag);
-            }
-            if (ohc.stag) |stag| {
-                try writer.writeU16(stag);
-            }
-        }
-
-        // Update Forwarding Parameters length
-        const fwd_length: u16 = @intCast(writer.pos - fwd_start - 4);
-        const saved_pos = writer.pos;
-        writer.pos = fwd_length_pos;
-        try writer.writeU16(fwd_length);
-        writer.pos = saved_pos;
-    }
-
-    // Update CreateFAR length
-    const ie_length: u16 = @intCast(writer.pos - ie_start - 4);
-    const final_pos = writer.pos;
-    writer.pos = length_pos;
-    try writer.writeU16(ie_length);
-    writer.pos = final_pos;
+    // Use the zig-pfcp library's encode function
+    try pfcp.marshal.encodeCreateFAR(writer, create_far);
 }
 
 fn encodeCreateQER(writer: *pfcp.Writer, create_qer: pfcp.ie.CreateQER) !void {
-    const ie_start = writer.pos;
-
-    // IE Header: type (create_qer = 7) + length (filled later)
-    try writer.writeU16(@intFromEnum(pfcp.types.IEType.create_qer));
-    const length_pos = writer.pos;
-    try writer.writeU16(0); // placeholder
-
-    // QER ID (IE type 109)
-    try writer.writeU16(109); // QER ID IE type
-    try writer.writeU16(4); // length
-    try writer.writeU32(create_qer.qer_id.qer_id);
-
-    // Gate Status (IE type 25) if present
-    if (create_qer.gate_status) |gate| {
-        try writer.writeU16(@intFromEnum(pfcp.types.IEType.gate_status));
-        try writer.writeU16(1); // length
-        // Pack UL (bits 0-1) and DL (bits 2-3) into a single byte
-        const gate_byte: u8 = (@as(u8, @intFromEnum(gate.dl_gate)) << 2) | @as(u8, @intFromEnum(gate.ul_gate));
-        try writer.writeByte(gate_byte);
-    }
-
-    // MBR (IE type 26) if present
-    if (create_qer.mbr) |mbr| {
-        try writer.writeU16(@intFromEnum(pfcp.types.IEType.mbr));
-        try writer.writeU16(10); // length (5 bytes uplink + 5 bytes downlink)
-        // Uplink (40 bits)
-        try writer.writeByte(@intCast((mbr.ul_mbr >> 32) & 0xFF));
-        try writer.writeU32(@intCast(mbr.ul_mbr & 0xFFFFFFFF));
-        // Downlink (40 bits)
-        try writer.writeByte(@intCast((mbr.dl_mbr >> 32) & 0xFF));
-        try writer.writeU32(@intCast(mbr.dl_mbr & 0xFFFFFFFF));
-    }
-
-    // GBR (IE type 27) if present
-    if (create_qer.gbr) |gbr| {
-        try writer.writeU16(@intFromEnum(pfcp.types.IEType.gbr));
-        try writer.writeU16(10); // length (5 bytes uplink + 5 bytes downlink)
-        // Uplink (40 bits)
-        try writer.writeByte(@intCast((gbr.ul_gbr >> 32) & 0xFF));
-        try writer.writeU32(@intCast(gbr.ul_gbr & 0xFFFFFFFF));
-        // Downlink (40 bits)
-        try writer.writeByte(@intCast((gbr.dl_gbr >> 32) & 0xFF));
-        try writer.writeU32(@intCast(gbr.dl_gbr & 0xFFFFFFFF));
-    }
-
-    // Update CreateQER length
-    const ie_length: u16 = @intCast(writer.pos - ie_start - 4);
-    const final_pos = writer.pos;
-    writer.pos = length_pos;
-    try writer.writeU16(ie_length);
-    writer.pos = final_pos;
+    // Use the zig-pfcp library's encode function
+    try pfcp.marshal.encodeCreateQER(writer, create_qer);
 }
 
 // Send PFCP Association Setup Request
