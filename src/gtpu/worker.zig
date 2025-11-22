@@ -7,7 +7,6 @@ const stats_mod = @import("../stats.zig");
 const session_mod = @import("../session.zig");
 const handler = @import("handler.zig");
 const nat_mod = @import("../nat.zig");
-const checksum = @import("../checksum.zig");
 const tun_mod = @import("../tun.zig");
 
 const net = std.net;
@@ -635,7 +634,7 @@ fn forwardToN3(ctx: *PacketContext, far: *types.FAR, stats: *stats_mod.Stats) vo
     _ = stats.n3_packets_tx.fetchAdd(1, .seq_cst);
 }
 
-// Forward to N6 (Core/Data Network) with NAT
+// Forward to N6 (Core/Data Network) - send directly to TUN, let iptables handle NAT
 fn forwardToN6(
     ctx: *PacketContext,
     far: *types.FAR,
@@ -644,9 +643,10 @@ fn forwardToN6(
     tun_device: ?*tun_mod.OptionalTun,
 ) void {
     _ = far;
+    _ = nat_table; // NAT is handled by iptables MASQUERADE, not application
 
-    // Check if we have NAT and TUN configured
-    if (nat_table == null or tun_device == null) {
+    // Check if we have TUN configured
+    if (tun_device == null) {
         // Stub mode - just count as forwarded
         print("Worker {}: N6 stub mode - TEID: 0x{x}, size: {} bytes\n", .{ ctx.thread_id, ctx.header.teid, ctx.payload.len });
         _ = stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
@@ -654,60 +654,39 @@ fn forwardToN6(
         return;
     }
 
-    const nat = nat_table.?;
     const tun = tun_device.?;
-
-    // Get mutable copy of payload for NAT rewriting
-    var packet_buf: [2048]u8 = undefined;
     const payload_len = ctx.payload.len;
-    if (payload_len > packet_buf.len or payload_len < 20) {
+
+    if (payload_len < 20) {
         print("Worker {}: Invalid packet size for N6: {} bytes\n", .{ ctx.thread_id, payload_len });
         _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
         return;
     }
-    @memcpy(packet_buf[0..payload_len], ctx.payload);
 
-    // Extract UE source address and port from inner IP packet
-    const src_ip = [4]u8{ packet_buf[12], packet_buf[13], packet_buf[14], packet_buf[15] };
-    const protocol = packet_buf[9];
-    const ihl = (packet_buf[0] & 0x0F) * 4;
+    // Extract source/dest info for logging
+    const src_ip = [4]u8{ ctx.payload[12], ctx.payload[13], ctx.payload[14], ctx.payload[15] };
+    const dst_ip = [4]u8{ ctx.payload[16], ctx.payload[17], ctx.payload[18], ctx.payload[19] };
+    const protocol = ctx.payload[9];
+    const ihl = (ctx.payload[0] & 0x0F) * 4;
 
     var src_port: u16 = 0;
-    if ((protocol == 6 or protocol == 17) and payload_len >= ihl + 2) {
-        src_port = std.mem.readInt(u16, packet_buf[ihl..][0..2], .big);
+    var dst_port: u16 = 0;
+    if ((protocol == 6 or protocol == 17) and payload_len >= ihl + 4) {
+        src_port = std.mem.readInt(u16, ctx.payload[ihl..][0..2], .big);
+        dst_port = std.mem.readInt(u16, ctx.payload[ihl + 2..][0..2], .big);
     }
 
-    // Get session SEID for NAT entry binding
-    const seid = if (ctx.session) |s| s.seid else 0;
-
-    // Get or create NAT mapping
-    const nat_entry = nat.getOrCreateMapping(src_ip, src_port, protocol, seid) orelse {
-        print("Worker {}: NAT table full, dropping packet\n", .{ctx.thread_id});
-        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
-        return;
-    };
-
-    // Perform SNAT (Source NAT) - rewrite source IP and port
-    if (!checksum.applySNAT(packet_buf[0..payload_len], payload_len, nat_entry.external_ip, nat_entry.external_port)) {
-        print("Worker {}: SNAT failed\n", .{ctx.thread_id});
-        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
-        return;
-    }
-
-    // Update NAT entry statistics
-    nat_entry.updateStats(payload_len);
-
-    // Send via TUN interface
-    _ = tun.write(packet_buf[0..payload_len]) catch |err| {
+    // Write packet directly to TUN - iptables MASQUERADE will handle NAT
+    _ = tun.write(ctx.payload) catch |err| {
         print("Worker {}: Failed to send to N6 TUN: {}\n", .{ ctx.thread_id, err });
         _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
         return;
     };
 
-    print("Worker {}: N6 TX via NAT: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}, {} bytes\n", .{
+    print("Worker {}: N6 TX: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}, {} bytes (via TUN, iptables NAT)\n", .{
         ctx.thread_id,
-        src_ip[0],                 src_ip[1],                 src_ip[2],                 src_ip[3],                 src_port,
-        nat_entry.external_ip[0], nat_entry.external_ip[1], nat_entry.external_ip[2], nat_entry.external_ip[3], nat_entry.external_port,
+        src_ip[0],  src_ip[1],  src_ip[2],  src_ip[3],  src_port,
+        dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port,
         payload_len,
     });
 
@@ -800,11 +779,12 @@ pub fn gtpuWorkerThread(
 
 /// Process a downlink packet from the N6 data network
 /// This is called from the N6 receiver thread for packets returning from the internet
+/// iptables conntrack has already reversed NAT, so destination IP is the UE IP
 /// Steps:
-/// 1. Reverse NAT lookup to find original UE IP/port
+/// 1. Extract destination IP (UE IP - already restored by iptables conntrack)
 /// 2. Find session by UE IP
 /// 3. Match PDR with source_interface=1 (N6)
-/// 4. Execute FAR (typically re-encapsulate with GTP-U and forward to gNodeB via N3)
+/// 4. Execute FAR (re-encapsulate with GTP-U and forward to gNodeB via N3)
 pub fn processN6Downlink(
     packet: []u8,
     packet_len: usize,
@@ -813,6 +793,8 @@ pub fn processN6Downlink(
     stats: *stats_mod.Stats,
     gtpu_socket: std.posix.socket_t,
 ) void {
+    _ = nat_table; // NAT is handled by iptables, not application
+
     if (packet_len < 20) {
         print("N6 Downlink: Packet too small: {} bytes\n", .{packet_len});
         _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
@@ -827,40 +809,29 @@ pub fn processN6Downlink(
         return;
     }
 
-    // Extract destination IP and port (this is the NAT'ed external address)
-    const dst_ip = [4]u8{ packet[16], packet[17], packet[18], packet[19] };
+    // Extract source and destination IP - destination is the UE IP (iptables conntrack restored it)
+    const src_ip = [4]u8{ packet[12], packet[13], packet[14], packet[15] };
+    const ue_ip = [4]u8{ packet[16], packet[17], packet[18], packet[19] };
     const protocol = packet[9];
     const ihl = (packet[0] & 0x0F) * 4;
 
+    var src_port: u16 = 0;
     var dst_port: u16 = 0;
     if ((protocol == 6 or protocol == 17) and packet_len >= ihl + 4) {
+        src_port = std.mem.readInt(u16, packet[ihl..][0..2], .big);
         dst_port = std.mem.readInt(u16, packet[ihl + 2..][0..2], .big);
     }
 
-    // Look up NAT entry by external port to find original UE
-    const nat_entry = nat_table.lookupByExternal(dst_port, protocol) orelse {
-        print("N6 Downlink: No NAT entry for port {} proto {}\n", .{ dst_port, protocol });
-        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
-        _ = stats.n6_nat_misses.fetchAdd(1, .seq_cst);
-        return;
-    };
-
-    _ = stats.n6_nat_hits.fetchAdd(1, .seq_cst);
-
-    // Apply DNAT - restore original UE IP and port
-    if (!checksum.applyDNAT(packet, packet_len, nat_entry.ue_ip, nat_entry.ue_port)) {
-        print("N6 Downlink: DNAT failed\n", .{});
-        _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
-        return;
-    }
-
-    // Update NAT entry statistics
-    nat_entry.updateStats(packet_len);
+    print("N6 Downlink: Received {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} ({} bytes)\n", .{
+        src_ip[0], src_ip[1], src_ip[2], src_ip[3], src_port,
+        ue_ip[0],  ue_ip[1],  ue_ip[2],  ue_ip[3],  dst_port,
+        packet_len,
+    });
 
     // Find session and PDR by UE IP for downlink
-    const match = session_manager.findSessionByUeIp(nat_entry.ue_ip, protocol, dst_port) orelse {
+    const match = session_manager.findSessionByUeIp(ue_ip, protocol, dst_port) orelse {
         print("N6 Downlink: No session for UE {}.{}.{}.{}\n", .{
-            nat_entry.ue_ip[0], nat_entry.ue_ip[1], nat_entry.ue_ip[2], nat_entry.ue_ip[3],
+            ue_ip[0], ue_ip[1], ue_ip[2], ue_ip[3],
         });
         _ = stats.gtpu_packets_dropped.fetchAdd(1, .seq_cst);
         return;
@@ -920,10 +891,8 @@ pub fn processN6Downlink(
         return;
     };
 
-    print("N6 Downlink: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} via GTP-U TEID 0x{x}\n", .{
-        dst_ip[0],            dst_ip[1],            dst_ip[2],            dst_ip[3],            dst_port,
-        nat_entry.ue_ip[0], nat_entry.ue_ip[1], nat_entry.ue_ip[2], nat_entry.ue_ip[3], nat_entry.ue_port,
-        far.teid,
+    print("N6 Downlink: Forwarded to gNodeB via GTP-U TEID 0x{x}, gNodeB IP {}.{}.{}.{}\n", .{
+        far.teid, far.ipv4[0], far.ipv4[1], far.ipv4[2], far.ipv4[3],
     });
 
     _ = stats.gtpu_packets_tx.fetchAdd(1, .seq_cst);
