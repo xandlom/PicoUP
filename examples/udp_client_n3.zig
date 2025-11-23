@@ -115,7 +115,7 @@ pub fn main() !void {
 
     print("\n", .{});
     print("╔════════════════════════════════════════════════════════════╗\n", .{});
-    print("║          UDP Client (N3 Side - gNodeB Simulator)          ║\n", .{});
+    print("║          UDP Client (N3 Side - gNodeB Simulator)           ║\n", .{});
     print("╚════════════════════════════════════════════════════════════╝\n", .{});
     print("\n", .{});
     print("Configuration:\n", .{});
@@ -310,10 +310,24 @@ fn sendSessionEstablishment(state: *State) !void {
     const bytes = try posix.recv(state.pfcp_socket, &resp, 0);
     if (bytes >= 8 and resp[1] == @intFromEnum(pfcp.types.MessageType.session_establishment_response)) {
         print("Received PFCP Session Establishment Response - OK\n", .{});
-        // Extract UP SEID from response (simplified)
-        if (bytes >= 20) {
-            state.up_seid = std.mem.readInt(u64, resp[4..12], .big);
-            print("  UP SEID: 0x{x}\n", .{state.up_seid});
+        // Parse response using zig-pfcp library
+        var reader = pfcp.marshal.Reader.init(resp[0..bytes]);
+        _ = pfcp.marshal.decodePfcpHeader(&reader) catch {
+            print("  Failed to parse response header\n", .{});
+            return;
+        };
+        // Parse IEs to find UP F-SEID
+        while (reader.remaining() > 0) {
+            const ie_header = pfcp.marshal.decodeIEHeader(&reader) catch break;
+            const ie_type: pfcp.types.IEType = @enumFromInt(ie_header.ie_type);
+            if (ie_type == .f_seid) {
+                const fseid = pfcp.marshal.decodeFSEID(&reader, ie_header.length) catch break;
+                state.up_seid = fseid.seid;
+                print("  UP SEID: 0x{x}\n", .{state.up_seid});
+                break;
+            } else {
+                reader.pos += ie_header.length;
+            }
         }
     }
 }
@@ -421,7 +435,7 @@ fn sendSessionDeletion(state: *State) !void {
         .s = true,
         .message_type = @intFromEnum(pfcp.types.MessageType.session_deletion_request),
         .message_length = 0,
-        .seid = CP_SEID,
+        .seid = state.up_seid,
         .sequence_number = @intCast(state.nextSeq()),
         .spare3 = 0,
     };
