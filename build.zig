@@ -136,4 +136,44 @@ pub fn build(b: *std.Build) void {
 
     const n3_client_step = b.step("example-n3-client", "Run N3 UDP client");
     n3_client_step.dependOn(&run_n3_client.step);
+
+    // Build N6 TCP Echo Server example
+    const tcp_echo_server = b.addExecutable(.{
+        .name = "tcp_echo_server_n6",
+        .root_source_file = b.path("examples/tcp_echo_server_n6.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    b.installArtifact(tcp_echo_server);
+
+    const run_tcp_echo_server = b.addRunArtifact(tcp_echo_server);
+    run_tcp_echo_server.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_tcp_echo_server.addArgs(args);
+    }
+
+    const tcp_echo_server_step = b.step("example-tcp-echo-server", "Run N6 TCP echo server");
+    tcp_echo_server_step.dependOn(&run_tcp_echo_server.step);
+
+    // Build N3 TCP Client example
+    const tcp_n3_client = b.addExecutable(.{
+        .name = "tcp_client_n3",
+        .root_source_file = b.path("examples/tcp_client_n3.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    tcp_n3_client.root_module.addImport("zig-pfcp", pfcp_module);
+
+    b.installArtifact(tcp_n3_client);
+
+    const run_tcp_n3_client = b.addRunArtifact(tcp_n3_client);
+    run_tcp_n3_client.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_tcp_n3_client.addArgs(args);
+    }
+
+    const tcp_n3_client_step = b.step("example-tcp-n3-client", "Run N3 TCP client");
+    tcp_n3_client_step.dependOn(&run_tcp_n3_client.step);
 }
