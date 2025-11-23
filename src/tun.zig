@@ -49,12 +49,12 @@ pub const TunDevice = struct {
         // Attach to existing TUN device using ioctl
         const result = std.os.linux.ioctl(fd, TUNSETIFF, @intFromPtr(&ifr));
         if (result != 0) {
-            print("TUN: Failed to attach to device '{}'\n", .{std.fmt.fmtSliceEscapeLower(dev_name)});
-            print("TUN: Make sure the device exists: sudo ip tuntap add dev {} mode tun user $USER\n", .{std.fmt.fmtSliceEscapeLower(dev_name)});
+            print("TUN: Failed to attach to device '{s}'\n", .{dev_name});
+            print("TUN: Make sure the device exists: sudo ip tuntap add dev {s} mode tun user $USER\n", .{dev_name});
             return error.TunSetupFailed;
         }
 
-        print("TUN: Attached to device '{}'\n", .{std.fmt.fmtSliceEscapeLower(&ifr.name)});
+        print("TUN: Attached to device '{s}'\n", .{dev_name});
 
         return TunDevice{
             .fd = fd,
@@ -96,7 +96,7 @@ pub const TunDevice = struct {
         if (self.active) {
             posix.close(self.fd);
             self.active = false;
-            print("TUN: Closed device '{}'\n", .{std.fmt.fmtSliceEscapeLower(&self.name)});
+            print("TUN: Closed device '{s}'\n", .{self.getName()});
         }
     }
 
@@ -114,7 +114,7 @@ pub const OptionalTun = struct {
 
     pub fn init(dev_name: []const u8) OptionalTun {
         const device = TunDevice.open(dev_name) catch |err| {
-            print("TUN: Failed to open '{}': {} - running in stub mode\n", .{ std.fmt.fmtSliceEscapeLower(dev_name), err });
+            print("TUN: Failed to open '{s}': {} - running in stub mode\n", .{ dev_name, err });
             print("TUN: N6 packets will be counted but not forwarded to data network\n", .{});
             print("TUN: To enable N6 forwarding, run: scripts/setup_n6.sh\n", .{});
             return OptionalTun{
