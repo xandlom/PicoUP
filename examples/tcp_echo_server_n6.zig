@@ -69,7 +69,7 @@ pub fn main() !void {
         var client_addr: posix.sockaddr = undefined;
         var client_addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
 
-        const client_socket = posix.accept(server_socket, &client_addr, &client_addr_len) catch |err| {
+        const client_socket = posix.accept(server_socket, &client_addr, &client_addr_len, 0) catch |err| {
             print("Error accepting connection: {}\n", .{err});
             continue;
         };

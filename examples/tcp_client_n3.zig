@@ -837,7 +837,7 @@ fn buildTcpPacket(
     tcp_sum += @as(u32, dst_ip[0]) << 8 | dst_ip[1];
     tcp_sum += @as(u32, dst_ip[2]) << 8 | dst_ip[3];
     tcp_sum += 6; // Protocol TCP
-    tcp_sum += tcp_header_len + payload.len; // TCP length
+    tcp_sum += @as(u32, @intCast(tcp_header_len + payload.len)); // TCP length
 
     // TCP header + payload
     const tcp_total_len = tcp_header_len + payload.len;
