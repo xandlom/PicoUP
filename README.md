@@ -93,8 +93,47 @@ PicoUP is a simple, lightweight User Plane Function (UPF) implementation for 5G 
 ### Requirements
 
 - Zig 0.14.1
+- Docker and Docker Compose (for containerized deployment)
 
-### Install Zig
+### Option 1: Docker Compose (Recommended)
+
+The easiest way to run PicoUP with all examples:
+
+```bash
+git clone <repository-url>
+cd PicoUP
+
+# Build and start UPF with echo servers
+docker-compose up
+
+# Or build images first
+docker-compose build
+
+# Run specific services
+docker-compose up upf echo-server
+```
+
+**Run end-to-end test:**
+```bash
+# Terminal 1: Start UPF and echo server
+docker-compose up upf echo-server
+
+# Terminal 2: Run N3 client test
+docker-compose run --rm n3-client
+```
+
+**Run TCP test:**
+```bash
+# Terminal 1: Start UPF and TCP echo server
+docker-compose --profile tcp up upf tcp-echo-server
+
+# Terminal 2: Run TCP N3 client
+docker-compose run --rm tcp-n3-client
+```
+
+### Option 2: Native Build
+
+#### Install Zig
 
 ```bash
 cd /tmp
@@ -103,17 +142,31 @@ tar -xJf zig-0.14.1.tar.xz
 export PATH=/tmp/zig-x86_64-linux-0.14.1:$PATH
 ```
 
-### Build PicoUP
+#### Build PicoUP
 
 ```bash
 git clone <repository-url>
 cd PicoUP
+git submodule update --init --recursive
 zig build
 ```
 
 The executable will be located at `zig-out/bin/picoupf`
 
 ## Running
+
+### With Docker Compose
+
+```bash
+docker-compose up upf
+```
+
+The UPF container automatically:
+- Creates and configures the TUN device
+- Sets up routing and IP forwarding
+- Starts listening on ports 8805 (PFCP) and 2152 (GTP-U)
+
+### Native
 
 ```bash
 ./zig-out/bin/picoupf
@@ -190,6 +243,29 @@ The `examples/` directory contains tools for testing the complete data path.
 ### End-to-End Test with Echo Server
 
 This demonstrates the complete N3 → UPF → N6 → Echo Server → N6 → UPF → N3 flow.
+
+#### With Docker Compose (Easy Method)
+
+**Terminal 1: Start UPF and Echo Server**
+```bash
+docker-compose up upf echo-server
+```
+
+**Terminal 2: Run N3 Client**
+```bash
+docker-compose run --rm n3-client
+```
+
+**For TCP test:**
+```bash
+# Terminal 1
+docker-compose --profile tcp up upf tcp-echo-server
+
+# Terminal 2
+docker-compose run --rm tcp-n3-client
+```
+
+#### Native Build
 
 **Terminal 1: Start Echo Server (N6 side)**
 ```bash
