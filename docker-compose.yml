@@ -11,8 +11,6 @@
 #   docker-compose down       # Stop all services
 #   docker-compose logs -f    # Follow logs
 
-version: '3.8'
-
 services:
   # PicoUP - 5G User Plane Function
   upf:
