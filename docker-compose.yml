@@ -1,0 +1,110 @@
+# Docker Compose for PicoUP - 5G User Plane Function
+#
+# This setup creates a complete testing environment with:
+# - UPF (User Plane Function) with TUN device support
+# - Echo Server (simulates application on N6/data network)
+# - N3 Client (simulates gNodeB + UE)
+#
+# Usage:
+#   docker-compose up         # Start all services
+#   docker-compose up upf     # Start only UPF
+#   docker-compose down       # Stop all services
+#   docker-compose logs -f    # Follow logs
+
+version: '3.8'
+
+services:
+  # PicoUP - 5G User Plane Function
+  upf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: picoupf
+    # Required for TUN device creation and network configuration
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    # Use host network mode for simplicity
+    # This allows UPF to bind to standard ports (8805, 2152)
+    network_mode: host
+    volumes:
+      # Mount source for development (optional)
+      - .:/app
+    entrypoint: ["/app/scripts/docker-entrypoint-upf.sh"]
+    restart: unless-stopped
+
+  # Echo Server (N6 side - simulates application server)
+  echo-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: picoupf-echo-server
+    network_mode: host
+    command: ["./zig-out/bin/echo_server_n6", "9999"]
+    depends_on:
+      - upf
+    restart: unless-stopped
+
+  # TCP Echo Server (N6 side - simulates TCP application server)
+  tcp-echo-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: picoupf-tcp-echo-server
+    network_mode: host
+    command: ["./zig-out/bin/tcp_echo_server_n6", "9998"]
+    depends_on:
+      - upf
+    restart: unless-stopped
+    profiles:
+      - tcp
+
+  # N3 Client (simulates gNodeB + UE) - runs once and exits
+  n3-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: picoupf-n3-client
+    network_mode: host
+    command: ["./zig-out/bin/udp_client_n3", "127.0.0.1", "9999"]
+    depends_on:
+      - upf
+      - echo-server
+    profiles:
+      - client
+    restart: "no"
+
+  # N3 TCP Client (simulates gNodeB + UE with TCP) - runs once and exits
+  tcp-n3-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: picoupf-tcp-n3-client
+    network_mode: host
+    command: ["./zig-out/bin/tcp_client_n3", "127.0.0.1", "9998"]
+    depends_on:
+      - upf
+      - tcp-echo-server
+    profiles:
+      - tcp-client
+    restart: "no"
+
+# Notes:
+# - Using host network mode for simplicity and to allow UPF to create TUN device
+# - UPF requires NET_ADMIN capability to create and configure TUN device
+# - Clients use profiles so they don't start automatically
+#
+# Example usage:
+#   # Start UPF and echo servers
+#   docker-compose up upf echo-server
+#
+#   # Run UDP test client (in another terminal)
+#   docker-compose run --rm n3-client
+#
+#   # Run TCP test (start TCP server and client)
+#   docker-compose --profile tcp up tcp-echo-server
+#   docker-compose run --rm tcp-n3-client
+#
+#   # Run integration tests
+#   docker-compose up upf echo-server && docker-compose run --rm n3-client

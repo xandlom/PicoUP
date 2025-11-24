@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Build artifacts (will be built inside container)
+zig-out/
+zig-cache/
+.zig-cache/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation (keep essential ones)
+*.md
+!README.md
+!CLAUDE.md
+
+# Docker files (already in context)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Test and temporary files
+*.tmp
+*.log
+test-results/
+
+# OS specific
+.Trash-*
+Thumbs.db
