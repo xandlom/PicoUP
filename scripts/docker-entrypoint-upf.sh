@@ -85,7 +85,11 @@ ip link set "$TUN_DEVICE" up
 
 # Enable IP forwarding
 log_info "Enabling IP forwarding"
-echo 1 > /proc/sys/net/ipv4/ip_forward
+if echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null; then
+    log_info "IP forwarding enabled"
+else
+    log_warn "Could not enable IP forwarding (might be read-only or already enabled on host)"
+fi
 
 # Add route for UE subnet
 log_info "Adding route for UE subnet: $UE_SUBNET"

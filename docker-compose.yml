@@ -11,8 +11,6 @@
 #   docker-compose down       # Stop all services
 #   docker-compose logs -f    # Follow logs
 
-version: '3.8'
-
 services:
   # PicoUP - 5G User Plane Function
   upf:
@@ -27,10 +25,8 @@ services:
       - /dev/net/tun
     # Use host network mode for simplicity
     # This allows UPF to bind to standard ports (8805, 2152)
+    # Note: sysctls cannot be used with host networking mode
     network_mode: host
-    volumes:
-      # Mount source for development (optional)
-      - .:/app
     entrypoint: ["/app/scripts/docker-entrypoint-upf.sh"]
     restart: unless-stopped
 

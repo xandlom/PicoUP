@@ -10,12 +10,12 @@ RUN apt-get update && apt-get install -y \
     iptables \
     iputils-ping \
     net-tools \
+    kmod \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Zig 0.14.1
-RUN curl -L https://ziglang.org/download/0.14.1/zig-linux-x86_64-0.14.1.tar.xz -o /tmp/zig-0.14.1.tar.xz && \
-    tar -xJf /tmp/zig-0.14.1.tar.xz -C /opt && \
-    ln -s /opt/zig-linux-x86_64-0.14.1/zig /usr/local/bin/zig && \
+RUN curl -L https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz -o /tmp/zig-0.14.1.tar.xz && \
+    tar -xf /tmp/zig-0.14.1.tar.xz -C /opt && \
     rm /tmp/zig-0.14.1.tar.xz
 
 # Set working directory
@@ -25,8 +25,7 @@ WORKDIR /app
 COPY . .
 
 # Initialize git submodules and build
-RUN git submodule update --init --recursive && \
-    zig build -Doptimize=ReleaseFast
+RUN /opt/zig-x86_64-linux-0.14.1/zig build -Doptimize=ReleaseFast
 
 # Expose PFCP and GTP-U ports
 EXPOSE 8805/udp 2152/udp
