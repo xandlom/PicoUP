@@ -18,9 +18,19 @@ zig build test                       # Unit tests
 zig build test-qer                   # QER integration test (requires UPF running)
 zig build test-urr                   # URR integration test (requires UPF running)
 
-# Examples
-zig build example-echo-server -- 9999     # N6 echo server
-zig build example-n3-client -- 127.0.0.1 9999  # N3 client (gNodeB simulator)
+# Examples - UDP
+zig build example-echo-server -- 9999          # N6 UDP echo server
+zig build example-n3-client -- 127.0.0.1 9999  # N3 UDP client (gNodeB simulator)
+
+# Examples - TCP
+zig build example-tcp-echo-server -- 9999      # N6 TCP echo server
+zig build example-tcp-n3-client -- 127.0.0.1 9999  # N3 TCP client
+
+# Docker Compose (alternative to native build)
+docker-compose up                              # Start all services
+docker-compose up upf echo-server              # Start UPF and echo server
+docker-compose run --rm n3-client              # Run N3 client test
+docker-compose --profile tcp up upf tcp-echo-server  # TCP test setup
 
 # Setup
 git submodule update --init --recursive   # Required: initialize deps
@@ -130,6 +140,7 @@ Fixed-size arrays used throughout for predictable memory. All counters are atomi
 
 ### Testing N6 End-to-End
 
+**Native Build:**
 ```bash
 # Terminal 1: Set up TUN and start UPF
 sudo ./scripts/setup_n6.sh setup
@@ -142,6 +153,15 @@ sudo ./scripts/setup_n6.sh setup
 ./zig-out/bin/udp_client_n3 127.0.0.1 9999
 ```
 
+**Docker Compose:**
+```bash
+# Terminal 1: Start UPF and echo server
+docker-compose up upf echo-server
+
+# Terminal 2: Run N3 client
+docker-compose run --rm n3-client
+```
+
 ## Key Constants (in `src/types.zig`)
 
 | Constant | Value | Notes |
@@ -151,6 +171,9 @@ sudo ./scripts/setup_n6.sh setup
 | `PFCP_PORT` | 8805 | Standard |
 | `GTPU_PORT` | 2152 | Standard |
 | `MAX_SESSIONS` | 100 | Limited due to stack size |
+| `N6_TUN_DEVICE` | "upf0" | TUN device name |
+| `N6_EXTERNAL_IP` | 10.45.0.1 | UPF's NAT IP |
+| `N6_UE_POOL_PREFIX` | 10.45.0.0/16 | UE IP pool |
 
 ## Known Limitations
 
