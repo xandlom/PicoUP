@@ -236,7 +236,7 @@ pub fn main() !void {
     print("Step 1: PFCP Association Setup\n", .{});
     print("═══════════════════════════════════════════════════════════\n", .{});
     try sendAssociationSetup();
-    time.sleep(200 * time.ns_per_ms);
+    std.Thread.sleep(200 * time.ns_per_ms);
 
     // Step 2: Session Establishment
     print("\n═══════════════════════════════════════════════════════════\n", .{});
@@ -300,7 +300,7 @@ pub fn main() !void {
         }
     }
 
-    time.sleep(100 * time.ns_per_ms);
+    std.Thread.sleep(100 * time.ns_per_ms);
     try sendAssociationRelease();
 
     print("\n", .{});
@@ -686,7 +686,7 @@ fn sendUdpPacketsAllSessions(num_sessions: u32, packets_per_session: u32) !void 
             ) catch continue;
             total_sent += 1;
 
-            time.sleep(10 * time.ns_per_ms);
+            std.Thread.sleep(10 * time.ns_per_ms);
 
             var from_addr: posix.sockaddr = undefined;
             var from_len: posix.socklen_t = @sizeOf(posix.sockaddr);

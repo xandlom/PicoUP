@@ -30,11 +30,11 @@ pub fn handlePfcpMessage(
     // Parse PFCP header using zig-pfcp library
     var reader = pfcp.marshal.Reader.init(data);
     const header = pfcp.marshal.decodePfcpHeader(&reader) catch |err| {
-        print("PFCP: Failed to decode header: {}\n", .{err});
+        print("PFCP: Failed to decode header: {any}\n", .{err});
         return;
     };
 
-    print("PFCP: Received message type {}, SEID: {?x}, seq: {}, from {}\n", .{ header.message_type, header.seid, header.sequence_number, client_addr });
+    print("PFCP: Received message type {d}, SEID: {?x}, seq: {d}, from {any}\n", .{ header.message_type, header.seid, header.sequence_number, client_addr });
 
     // Handle different message types
     const msg_type: pfcp.types.MessageType = @enumFromInt(header.message_type);

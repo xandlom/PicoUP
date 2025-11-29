@@ -305,7 +305,7 @@ pub fn natCleanupThread(
 
     while (!should_stop.load(.seq_cst)) {
         // Run cleanup every 30 seconds
-        time.sleep(30 * time.ns_per_s);
+        std.Thread.sleep(30 * time.ns_per_s);
 
         const cleaned = nat_table.cleanup();
         if (cleaned > 0) {

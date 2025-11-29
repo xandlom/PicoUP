@@ -36,7 +36,7 @@ docker-compose --profile tcp up upf tcp-echo-server  # TCP test setup
 git submodule update --init --recursive   # Required: initialize deps
 ```
 
-**Zig Version**: 0.14.1 (required)
+**Zig Version**: 0.15.2 (required)
 
 ## Architecture Overview
 

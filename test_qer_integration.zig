@@ -409,7 +409,7 @@ fn sendUplinkPackets(state: *TestState, count: u32) !void {
         );
 
         // Small delay between packets (10ms)
-        time.sleep(10 * time.ns_per_ms);
+        std.Thread.sleep(10 * time.ns_per_ms);
     }
 
     print("✓ Sent {} uplink packets (UE {}.{}.{}.{} -> {}.{}.{}.{})\n", .{
@@ -459,7 +459,7 @@ fn sendDownlinkPackets(state: *TestState, count: u32) !void {
         );
 
         // Small delay between packets (10ms)
-        time.sleep(10 * time.ns_per_ms);
+        std.Thread.sleep(10 * time.ns_per_ms);
     }
 
     print("✓ Sent {} downlink packets\n", .{count});
@@ -602,19 +602,20 @@ pub fn main() !void {
     print("   (Run: ./zig-out/bin/picoupf)\n", .{});
     print("\nPress Enter to start test...\n", .{});
 
-    const stdin = std.io.getStdIn().reader();
-    _ = try stdin.readByte();
+    var stdin_buffer: [256]u8 = undefined;
+    const stdin_file = std.fs.File.stdin();
+    _ = try stdin_file.read(&stdin_buffer);
 
     print("\n🚀 Starting integration test...\n", .{});
-    time.sleep(1 * time.ns_per_s);
+    std.Thread.sleep(1 * time.ns_per_s);
 
     // Step 1: Create PFCP association
     try sendAssociationSetupRequest(&state);
-    time.sleep(1 * time.ns_per_s);
+    std.Thread.sleep(1 * time.ns_per_s);
 
     // Step 2: Create PFCP session
     try sendSessionEstablishmentRequest(&state);
-    time.sleep(2 * time.ns_per_s);
+    std.Thread.sleep(2 * time.ns_per_s);
 
     // Step 3: Send GTP-U packets (3 rounds)
     var round: u32 = 1;
@@ -626,14 +627,14 @@ pub fn main() !void {
 
         // Send uplink packets
         try sendUplinkPackets(&state, state.config.packets_per_round);
-        time.sleep(1 * time.ns_per_s);
+        std.Thread.sleep(1 * time.ns_per_s);
 
         // Send downlink packets
         try sendDownlinkPackets(&state, state.config.packets_per_round);
 
         if (round < state.config.rounds) {
             print("\nWaiting {} seconds before next round...\n", .{state.config.delay_between_rounds_sec});
-            time.sleep(state.config.delay_between_rounds_sec * time.ns_per_s);
+            std.Thread.sleep(state.config.delay_between_rounds_sec * time.ns_per_s);
         }
     }
 
@@ -647,11 +648,11 @@ pub fn main() !void {
     print("  Total:    {} packets\n", .{state.config.packets_per_round * state.config.rounds * 2});
 
     print("\n⏱  Waiting 3 seconds for statistics...\n", .{});
-    time.sleep(3 * time.ns_per_s);
+    std.Thread.sleep(3 * time.ns_per_s);
 
     // Step 4: Delete PFCP session
     try sendSessionDeletionRequest(&state);
-    time.sleep(1 * time.ns_per_s);
+    std.Thread.sleep(1 * time.ns_per_s);
 
     // Step 5: Delete PFCP association
     try sendAssociationReleaseRequest(&state);

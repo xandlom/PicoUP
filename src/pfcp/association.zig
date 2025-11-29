@@ -18,7 +18,7 @@ pub fn handleAssociationSetup(
     pfcp_association_established: *Atomic(bool),
     stats: *stats_mod.Stats,
 ) void {
-    print("PFCP: Association Setup Request received from {}\n", .{client_addr});
+    print("PFCP: Association Setup Request received from {any}\n", .{client_addr});
 
     // Parse mandatory IEs: Node ID and Recovery Time Stamp
     var found_node_id = false;
@@ -70,7 +70,7 @@ pub fn handleAssociationSetup(
 
     // Establish association
     _ = pfcp_association_established.store(true, .seq_cst);
-    print("PFCP: Association established with {}\n", .{client_addr});
+    print("PFCP: Association established with {any}\n", .{client_addr});
 
     // Send success response
     sendAssociationSetupResponse(socket, req_header, client_addr, .request_accepted, stats);
@@ -124,7 +124,7 @@ fn sendAssociationSetupResponse(
     if (cause_value == .request_accepted) {
         print("PFCP: Association Setup Response sent (accepted)\n", .{});
     } else {
-        print("PFCP: Association Setup Response sent (cause: {})\n", .{cause_value});
+        print("PFCP: Association Setup Response sent (cause: {any})\n", .{cause_value});
     }
 }
 
@@ -136,7 +136,7 @@ pub fn handleAssociationRelease(
     client_addr: net.Address,
     pfcp_association_established: *Atomic(bool),
 ) void {
-    print("PFCP: Association Release Request received from {}\n", .{client_addr});
+    print("PFCP: Association Release Request received from {any}\n", .{client_addr});
     _ = reader;
 
     // Release the association
@@ -181,5 +181,5 @@ fn sendAssociationReleaseResponse(
         print("PFCP: Failed to send Association Release Response\n", .{});
     };
 
-    print("PFCP: Association Release Response sent (cause: {})\n", .{cause_value});
+    print("PFCP: Association Release Response sent (cause: {any})\n", .{cause_value});
 }

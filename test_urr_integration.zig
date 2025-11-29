@@ -384,7 +384,7 @@ fn sendUplinkPackets(state: *TestState, count: u32, phase: u8) !void {
         );
 
         // Small delay between packets (50ms)
-        time.sleep(50 * time.ns_per_ms);
+        std.Thread.sleep(50 * time.ns_per_ms);
     }
 
     const total_bytes = count * @as(u32, @intCast(state.config.packet_size));
@@ -534,19 +534,20 @@ pub fn main() !void {
     print("   (Run: ./zig-out/bin/picoupf)\n", .{});
     print("\nPress Enter to start test...\n", .{});
 
-    const stdin = std.io.getStdIn().reader();
-    _ = try stdin.readByte();
+    var stdin_buffer: [256]u8 = undefined;
+    const stdin_file = std.fs.File.stdin();
+    _ = try stdin_file.read(&stdin_buffer);
 
     print("\n🚀 Starting integration test...\n", .{});
-    time.sleep(1 * time.ns_per_s);
+    std.Thread.sleep(1 * time.ns_per_s);
 
     // Step 1: Create PFCP association
     try sendAssociationSetupRequest(&state);
-    time.sleep(1 * time.ns_per_s);
+    std.Thread.sleep(1 * time.ns_per_s);
 
     // Step 2: Create PFCP session with URR
     try sendSessionEstablishmentRequest(&state);
-    time.sleep(2 * time.ns_per_s);
+    std.Thread.sleep(2 * time.ns_per_s);
 
     print("\n", .{});
     print("═══════════════════════════════════════════════════════════\n", .{});
@@ -561,7 +562,7 @@ pub fn main() !void {
 
     try sendUplinkPackets(&state, state.config.packets_phase1, 1);
     print("\n⏱  Waiting 3 seconds for URR threshold detection...\n", .{});
-    time.sleep(3 * time.ns_per_s);
+    std.Thread.sleep(3 * time.ns_per_s);
 
     // Step 4: Phase 2 - Send more packets to exceed quota
     print("\n📈 Phase 1 sent ~{} bytes\n", .{state.config.packets_phase1 * @as(u32, @intCast(state.config.packet_size))});
@@ -569,7 +570,7 @@ pub fn main() !void {
 
     try sendUplinkPackets(&state, state.config.packets_phase2, 2);
     print("\n⏱  Waiting 3 seconds for URR quota enforcement...\n", .{});
-    time.sleep(3 * time.ns_per_s);
+    std.Thread.sleep(3 * time.ns_per_s);
 
     print("\n", .{});
     print("═══════════════════════════════════════════════════════════\n", .{});
@@ -582,11 +583,11 @@ pub fn main() !void {
     print("Expected volume quota: {} bytes (should drop excess packets)\n", .{state.config.volume_quota});
 
     print("\n⏱  Waiting 3 seconds for final statistics...\n", .{});
-    time.sleep(3 * time.ns_per_s);
+    std.Thread.sleep(3 * time.ns_per_s);
 
     // Step 5: Delete PFCP session
     try sendSessionDeletionRequest(&state);
-    time.sleep(1 * time.ns_per_s);
+    std.Thread.sleep(1 * time.ns_per_s);
 
     // Step 6: Delete PFCP association
     try sendAssociationReleaseRequest(&state);

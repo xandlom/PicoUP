@@ -82,7 +82,7 @@ pub fn statsThread(stats: *Stats, session_mgr: *session.SessionManager, should_s
     var last_tx: u64 = 0;
 
     while (!should_stop.load(.seq_cst)) {
-        time.sleep(5 * time.ns_per_s);
+        std.Thread.sleep(5 * time.ns_per_s);
 
         const pfcp_msgs = stats.pfcp_messages.load(.seq_cst);
         const pfcp_sess = stats.pfcp_sessions.load(.seq_cst);
@@ -109,14 +109,14 @@ pub fn statsThread(stats: *Stats, session_mgr: *session.SessionManager, should_s
         const active_sessions = session_mgr.session_count.load(.seq_cst);
 
         print("\n=== PicoUP Statistics ===\n", .{});
-        print("Uptime: {}s\n", .{uptime});
-        print("PFCP Messages: {}, Active Sessions: {}/{}\n", .{ pfcp_msgs, active_sessions, pfcp_sess });
-        print("GTP-U RX: {}, TX: {}, Dropped: {}\n", .{ gtpu_rx, gtpu_tx, gtpu_drop });
-        print("GTP-U Rate: {} pkt/s RX, {} pkt/s TX\n", .{ rx_rate, tx_rate });
-        print("GTP-U Echo: Req={}, Resp={}\n", .{ echo_req, echo_resp });
-        print("Interface TX: N3={}, N6={}, N9={}\n", .{ n3_tx, n6_tx, n9_tx });
-        print("QoS: Passed={}, MBR Dropped={}, PPS Dropped={}\n", .{ qos_passed, qos_mbr_drop, qos_pps_drop });
-        print("URR: Tracked={}, Reports={}, Quota Exceeded={}\n", .{ urr_tracked, urr_reports, urr_quota });
+        print("Uptime: {d}s\n", .{uptime});
+        print("PFCP Messages: {d}, Active Sessions: {d}/{d}\n", .{ pfcp_msgs, active_sessions, pfcp_sess });
+        print("GTP-U RX: {d}, TX: {d}, Dropped: {d}\n", .{ gtpu_rx, gtpu_tx, gtpu_drop });
+        print("GTP-U Rate: {d} pkt/s RX, {d} pkt/s TX\n", .{ rx_rate, tx_rate });
+        print("GTP-U Echo: Req={d}, Resp={d}\n", .{ echo_req, echo_resp });
+        print("Interface TX: N3={d}, N6={d}, N9={d}\n", .{ n3_tx, n6_tx, n9_tx });
+        print("QoS: Passed={d}, MBR Dropped={d}, PPS Dropped={d}\n", .{ qos_passed, qos_mbr_drop, qos_pps_drop });
+        print("URR: Tracked={d}, Reports={d}, Quota Exceeded={d}\n", .{ urr_tracked, urr_reports, urr_quota });
 
         // N6 NAT statistics
         const n6_rx = stats.n6_packets_rx.load(.seq_cst);
@@ -124,10 +124,10 @@ pub fn statsThread(stats: *Stats, session_mgr: *session.SessionManager, should_s
         const nat_hits = stats.n6_nat_hits.load(.seq_cst);
         const nat_misses = stats.n6_nat_misses.load(.seq_cst);
         const nat_active = stats.n6_nat_active.load(.seq_cst);
-        print("N6 NAT: RX={}, Active={}, Created={}, Hits={}, Misses={}\n", .{ n6_rx, nat_active, nat_created, nat_hits, nat_misses });
+        print("N6 NAT: RX={d}, Active={d}, Created={d}, Hits={d}, Misses={d}\n", .{ n6_rx, nat_active, nat_created, nat_hits, nat_misses });
 
-        print("Queue Size: {}\n", .{queue_sz});
-        print("Worker Threads: {}\n", .{types.WORKER_THREADS});
+        print("Queue Size: {d}\n", .{queue_sz});
+        print("Worker Threads: {d}\n", .{types.WORKER_THREADS});
         print("========================\n", .{});
 
         last_rx = gtpu_rx;

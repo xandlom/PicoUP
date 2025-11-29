@@ -47,7 +47,7 @@ fn pfcpThread(allocator: std.mem.Allocator) !void {
     try std.posix.setsockopt(pfcp_socket, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&enable));
     try std.posix.bind(pfcp_socket, &pfcp_addr.any, pfcp_addr.getOsSockLen());
 
-    print("PFCP listening on 0.0.0.0:{}\n", .{PFCP_PORT});
+    print("PFCP listening on 0.0.0.0:{d}\n", .{PFCP_PORT});
 
     var buffer: [2048]u8 = undefined;
 
@@ -62,7 +62,7 @@ fn pfcpThread(allocator: std.mem.Allocator) !void {
             &client_address.any,
             &client_address_len,
         ) catch |err| {
-            print("PFCP: Error receiving: {}\n", .{err});
+            print("PFCP: Error receiving: {any}\n", .{err});
             continue;
         };
 
@@ -94,7 +94,7 @@ fn gtpuThread(allocator: std.mem.Allocator) !void {
     try std.posix.setsockopt(gtpu_socket, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&enable));
     try std.posix.bind(gtpu_socket, &gtpu_addr.any, gtpu_addr.getOsSockLen());
 
-    print("GTP-U listening on 0.0.0.0:{}\n", .{GTPU_PORT});
+    print("GTP-U listening on 0.0.0.0:{d}\n", .{GTPU_PORT});
 
     var buffer: [2048]u8 = undefined;
 
@@ -126,7 +126,7 @@ fn gtpuThread(allocator: std.mem.Allocator) !void {
             // Check for Echo Response (for RTT monitoring, future enhancement)
             if (gtpu_handler.isEchoResponse(buffer[0..bytes_received])) {
                 _ = global_stats.gtpu_echo_responses.fetchAdd(1, .seq_cst);
-                print("GTP-U: Received Echo Response from {}\n", .{client_address});
+                print("GTP-U: Received Echo Response from {any}\n", .{client_address});
                 continue; // Echo response received, don't enqueue
             }
 
@@ -165,7 +165,7 @@ fn n6ReceiverThread() void {
         // Read packet from TUN device (this is a downlink packet from internet)
         const bytes_read = tun_device.read(&buffer) catch |err| {
             if (err == error.StubMode) {
-                std.time.sleep(100 * std.time.ns_per_ms);
+                std.Thread.sleep(100 * std.time.ns_per_ms);
                 continue;
             }
             print("N6 receiver: Read error: {}\n", .{err});
@@ -203,7 +203,7 @@ pub fn main() !void {
 
     print("=== PicoUP - User Plane Function ===\n", .{});
     print("Version: 0.1.0\n", .{});
-    print("Worker Threads: {}\n", .{WORKER_THREADS});
+    print("Worker Threads: {d}\n", .{WORKER_THREADS});
     print("Press Ctrl+C to stop\n\n", .{});
 
     // Initialize global state
@@ -218,11 +218,11 @@ pub fn main() !void {
     defer tun_device.close();
 
     if (tun_device.isStubMode()) {
-        print("N6: Running in stub mode (TUN device '{}' not available)\n", .{std.fmt.fmtSliceEscapeLower(types.N6_TUN_DEVICE)});
+        print("N6: Running in stub mode (TUN device '{s}' not available)\n", .{types.N6_TUN_DEVICE});
         print("N6: Uplink packets will be counted but not forwarded\n", .{});
         print("N6: To enable N6 forwarding, run: scripts/setup_n6.sh\n\n", .{});
     } else {
-        print("N6: TUN device '{}' attached, NAT enabled\n", .{std.fmt.fmtSliceEscapeLower(types.N6_TUN_DEVICE)});
+        print("N6: TUN device '{s}' attached, NAT enabled\n", .{types.N6_TUN_DEVICE});
         print("N6: External IP: {}.{}.{}.{}\n\n", .{
             types.N6_EXTERNAL_IP[0], types.N6_EXTERNAL_IP[1],
             types.N6_EXTERNAL_IP[2], types.N6_EXTERNAL_IP[3],

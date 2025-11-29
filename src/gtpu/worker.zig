@@ -770,7 +770,7 @@ pub fn gtpuWorkerThread(
             if (!trackUsage(&ctx, stats)) continue;
             executeFAR(&ctx, stats, nat_table, tun_device);
         } else {
-            time.sleep(1 * time.ns_per_ms);
+            std.Thread.sleep(1 * time.ns_per_ms);
         }
     }
 

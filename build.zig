@@ -7,23 +7,21 @@ pub fn build(b: *std.Build) void {
     // Create PFCP module from dependency
     const pfcp_module = b.createModule(.{
         .root_source_file = b.path("deps/zig-pfcp/src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
     });
 
     // Create GTP-U module from dependency
     const gtpu_module = b.createModule(.{
         .root_source_file = b.path("deps/zig-gtp-u/src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
     });
 
     // Build main UPF executable
     const upf = b.addExecutable(.{
         .name = "picoupf",
-        .root_source_file = b.path("src/upf.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/upf.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     // Add dependencies
@@ -45,9 +43,11 @@ pub fn build(b: *std.Build) void {
 
     // Create test step
     const upf_tests = b.addTest(.{
-        .root_source_file = b.path("src/upf.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/upf.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     upf_tests.root_module.addImport("zig-pfcp", pfcp_module);
@@ -60,9 +60,11 @@ pub fn build(b: *std.Build) void {
     // Build QER integration test executable
     const qer_test = b.addExecutable(.{
         .name = "test_qer_integration",
-        .root_source_file = b.path("test_qer_integration.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_qer_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     // Add dependencies
@@ -80,9 +82,11 @@ pub fn build(b: *std.Build) void {
     // Build URR integration test executable
     const urr_test = b.addExecutable(.{
         .name = "test_urr_integration",
-        .root_source_file = b.path("test_urr_integration.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_urr_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     // Add dependencies
@@ -100,9 +104,11 @@ pub fn build(b: *std.Build) void {
     // Build N6 Echo Server example
     const echo_server = b.addExecutable(.{
         .name = "echo_server_n6",
-        .root_source_file = b.path("examples/echo_server_n6.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/echo_server_n6.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     b.installArtifact(echo_server);
@@ -119,9 +125,11 @@ pub fn build(b: *std.Build) void {
     // Build N3 UDP Client example
     const n3_client = b.addExecutable(.{
         .name = "udp_client_n3",
-        .root_source_file = b.path("examples/udp_client_n3.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_client_n3.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     n3_client.root_module.addImport("zig-pfcp", pfcp_module);
@@ -140,9 +148,11 @@ pub fn build(b: *std.Build) void {
     // Build N6 TCP Echo Server example
     const tcp_echo_server = b.addExecutable(.{
         .name = "tcp_echo_server_n6",
-        .root_source_file = b.path("examples/tcp_echo_server_n6.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tcp_echo_server_n6.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     b.installArtifact(tcp_echo_server);
@@ -159,9 +169,11 @@ pub fn build(b: *std.Build) void {
     // Build N3 TCP Client example
     const tcp_n3_client = b.addExecutable(.{
         .name = "tcp_client_n3",
-        .root_source_file = b.path("examples/tcp_client_n3.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tcp_client_n3.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     tcp_n3_client.root_module.addImport("zig-pfcp", pfcp_module);
